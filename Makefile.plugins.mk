@@ -52,6 +52,7 @@ endif
 # Check for proper UI_TYPE parameter
 
 ifeq ($(UI_TYPE),)
+else ifeq ($(UI_TYPE),none)
 else ifeq ($(UI_TYPE),cairo)
 else ifeq ($(UI_TYPE),external)
 else ifeq ($(UI_TYPE),generic)
@@ -806,10 +807,21 @@ endif
 endif
 endif
 
+# ---------------------------------------------------------------------------------------------------------------------
+# CLAP: do not build/link UI when there is no UI code
+ifeq ($(FILES_UI),)
+CLAP_UI_OBJS =
+CLAP_UI_DEPS =
+else
+CLAP_UI_OBJS = $(OBJS_UI) $(BUILD_DIR)/DistrhoUIMain_CLAP.cpp.o
+CLAP_UI_DEPS = $(DGL_LIB) $(DGL_LIB_SHARED)
+endif
+
+
 clap: $(clap) $(clapfiles)
 
 ifeq ($(HAVE_DGL),true)
-$(clap): $(OBJS_DSP) $(OBJS_UI) $(BUILD_DIR)/DistrhoPluginMain_CLAP.cpp.o $(BUILD_DIR)/DistrhoUIMain_CLAP.cpp.o $(DGL_LIB) $(DGL_LIB_SHARED)
+$(clap): $(OBJS_DSP) $(BUILD_DIR)/DistrhoPluginMain_CLAP.cpp.o $(CLAP_UI_OBJS) $(CLAP_UI_DEPS)
 else
 $(clap): $(OBJS_DSP) $(BUILD_DIR)/DistrhoPluginMain_CLAP.cpp.o
 endif
