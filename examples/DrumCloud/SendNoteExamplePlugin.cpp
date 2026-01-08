@@ -479,11 +479,15 @@ int sampleLen = 0;
 float fStartPosNorm   = 0.0f;  // 0..1
 float fPosSpreadNorm  = 0.0f;  // 0..1
 
-// 👇 PUBLIC wrapper (så plugin kan loade samples)
 bool setSamplePath(const char* path)
 {
-    return loadSample(path);
+    if (path == nullptr || path[0] == '\0')
+        return false;
+
+    return loadSample(path); // loadSample er private, men vi er inde i klassen
 }
+
+
 
 private:
 void updateDensityFromNorm()
@@ -654,6 +658,34 @@ void updateDensityFromNorm()
             else if (loopR[i] < -1.0f) loopR[i] = -1.0f;
         }
     }
+    void buildWaveformPreview()
+{
+    if (sampleL.empty())
+        return;
+
+    const int n = sampleL.size();
+    const int step = std::max(1, n / kWavePreviewSize);
+
+    for (int i = 0; i < kWavePreviewSize; ++i)
+    {
+        int start = i * step;
+        int end   = std::min(start + step, n);
+
+        float mn =  1.0f;
+        float mx = -1.0f;
+
+        for (int j = start; j < end; ++j)
+        {
+            float v = sampleL[j];
+            mn = std::min(mn, v);
+            mx = std::max(mx, v);
+        }
+
+        waveMin[i] = mn;
+        waveMax[i] = mx;
+    }
+}
+
 
     bool loadSample(const char* path)
 {
@@ -663,8 +695,22 @@ void updateDensityFromNorm()
 
     sampleSR  = sr;
     sampleLen = (int)sampleL.size();
-    return (sampleLen > 0);
+
+    if (sampleLen <= 0)
+    {
+        // Nulstil waveform preview, så UI ikke viser gammelt data
+        std::fill_n(waveMin, kWavePreviewSize, 0.0f);
+        std::fill_n(waveMax, kWavePreviewSize, 0.0f);
+        return false;
+    }
+
+    // 🔹 build waveform preview ONCE, after successful load
+    buildWaveformPreview();
+
+    return true;
 }
+
+
 
 
 
@@ -797,6 +843,9 @@ if (activeCount < kMaxGrains)
     uint8_t fCurrentNote = 60;
     uint8_t fCurrentVel  = 100;
 
+static constexpr int kWavePreviewSize = 1024;
+float waveMin[kWavePreviewSize];
+float waveMax[kWavePreviewSize];
 
     
 };
@@ -941,6 +990,7 @@ void setState(const char* key, const char* value) override
         fGran.setSamplePath(value);
     }
 }
+
 
 
 
