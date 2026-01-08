@@ -21,6 +21,10 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <vector>
+#include <string>
+#include <fstream>
+
 
 //#define DRUMCLOUD_DEBUG 1
 
@@ -64,6 +68,116 @@ struct Grain
 
 };
 
+static bool loadWav16(const char* path,
+                      std::vector<float>& outL,
+                      std::vector<float>& outR,
+                      uint32_t& outSR)
+{
+    outL.clear();
+    outR.clear();
+    outSR = 0;
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f.good())
+        return false;
+
+    auto read_u32 = [&](uint32_t& v) { f.read(reinterpret_cast<char*>(&v), 4); return f.good(); };
+    auto read_u16 = [&](uint16_t& v) { f.read(reinterpret_cast<char*>(&v), 2); return f.good(); };
+
+    char riff[4]{};
+    uint32_t riffSize = 0;
+    char wave[4]{};
+
+    f.read(riff, 4);
+    if (std::strncmp(riff, "RIFF", 4) != 0) return false;
+    if (!read_u32(riffSize)) return false;
+    f.read(wave, 4);
+    if (std::strncmp(wave, "WAVE", 4) != 0) return false;
+
+    // Parse chunks
+    uint16_t audioFormat = 0;
+    uint16_t numCh = 0;
+    uint32_t sampleRate = 0;
+    uint16_t bitsPerSample = 0;
+
+    std::streampos dataPos = 0;
+    uint32_t dataSize = 0;
+
+    while (f.good() && (!dataPos || audioFormat == 0))
+    {
+        char id[4]{};
+        uint32_t size = 0;
+        f.read(id, 4);
+        if (!f.good()) break;
+        if (!read_u32(size)) break;
+
+        if (std::strncmp(id, "fmt ", 4) == 0)
+        {
+            uint16_t blockAlign = 0;
+            uint32_t byteRate = 0;
+
+            read_u16(audioFormat);
+            read_u16(numCh);
+            read_u32(sampleRate);
+            read_u32(byteRate);
+            read_u16(blockAlign);
+            read_u16(bitsPerSample);
+
+            // Skip any extra fmt bytes
+            if (size > 16)
+                f.seekg(size - 16, std::ios::cur);
+        }
+        else if (std::strncmp(id, "data", 4) == 0)
+        {
+            dataPos = f.tellg();
+            dataSize = size;
+            f.seekg(size, std::ios::cur);
+        }
+        else
+        {
+            // Skip unknown chunk
+            f.seekg(size, std::ios::cur);
+        }
+
+        // Chunks are word-aligned
+        if (size & 1)
+            f.seekg(1, std::ios::cur);
+    }
+
+    // Only PCM 16-bit supported in this minimal loader
+    if (audioFormat != 1 || bitsPerSample != 16 || (numCh != 1 && numCh != 2) || dataPos == 0 || dataSize == 0)
+        return false;
+
+    outSR = sampleRate;
+
+    // Read samples
+    const uint32_t bytesPerFrame = numCh * 2;
+    const uint32_t frames = dataSize / bytesPerFrame;
+
+    outL.resize(frames);
+    outR.resize(frames);
+
+    f.clear();
+    f.seekg(dataPos);
+
+    for (uint32_t i = 0; i < frames; ++i)
+    {
+        int16_t s0 = 0;
+        int16_t s1 = 0;
+        f.read(reinterpret_cast<char*>(&s0), 2);
+        if (numCh == 2) f.read(reinterpret_cast<char*>(&s1), 2);
+
+        const float l = float(s0) / 32768.0f;
+        const float r = (numCh == 2) ? (float(s1) / 32768.0f) : l;
+
+        outL[i] = l;
+        outR[i] = r;
+    }
+
+    return true;
+}
+
+
 
 class GranularEngine
 {
@@ -77,11 +191,14 @@ public:
         win[i] = 0.5f - 0.5f * std::cos(2.0f * float(M_PI) * ph);
     }
 
-    makeTestLoop();
-    makeMarkers();
+            makeTestLoop();
+        makeMarkers();
 
-    fDensityNorm = 0.25f;
-    updateDensityFromNorm();
+    
+
+        fDensityNorm = 0.25f;
+        updateDensityFromNorm();
+
 
     reset(); // ✅ semikolon
 }
@@ -273,8 +390,39 @@ void process(float* outL, float* outR, uint32_t frames)
             }
 
             float sL = 0.0f;
-            float sR = 0.0f;
-            readLoopLinear(g.pos, sL, sR);
+float sR = 0.0f;
+
+if (sampleLen > 0)
+{
+    // sample (ingen wrap – clamp + linear interpolation)
+    const int32_t i0 = int32_t(g.pos);
+    const float frac = g.pos - float(i0);
+
+    if (i0 < 0 || i0 >= sampleLen)
+    {
+        // out of range -> kill grain
+        g.active = false;
+        swapRemove(i);
+        continue;
+    }
+
+    int32_t i1 = i0 + 1;
+    if (i1 >= sampleLen) i1 = sampleLen - 1;
+
+    const float aL = sampleL[i0];
+    const float bL = sampleL[i1];
+    const float aR = sampleR[i0];
+    const float bR = sampleR[i1];
+
+    sL = aL + (bL - aL) * frac;
+    sR = aR + (bR - aR) * frac;
+}
+else
+{
+    // fallback til loop (som før)
+    readLoopLinear(g.pos, sL, sR);
+}
+
 
             const float w = windowAt(g.age, g.dur);
 
@@ -295,8 +443,23 @@ void process(float* outL, float* outR, uint32_t frames)
             l += vv;
             r += vv;
 
-            g.pos = wrapPos(g.pos + g.step);
-            ++g.age;
+            if (sampleLen > 0)
+{
+    g.pos += g.step;
+    if (g.pos < 0.0f || g.pos >= float(sampleLen - 1))
+    {
+        g.active = false;
+        swapRemove(i);
+        continue;
+    }
+}
+else
+{
+    g.pos = wrapPos(g.pos + g.step);
+}
+
+++g.age;
+
 
             ++i;
         }
@@ -306,9 +469,25 @@ void process(float* outL, float* outR, uint32_t frames)
     }
 }
 
+// ---- sample buffer ----
+std::vector<float> sampleL;
+std::vector<float> sampleR;
+uint32_t sampleSR = 0;
+int sampleLen = 0;
+
+// ---- position random ----
+float fStartPosNorm   = 0.0f;  // 0..1
+float fPosSpreadNorm  = 0.0f;  // 0..1
+
+// 👇 PUBLIC wrapper (så plugin kan loade samples)
+bool setSamplePath(const char* path)
+{
+    return loadSample(path);
+}
 
 private:
 void updateDensityFromNorm()
+
 {
     const float minD = 2.0f;
     const float maxD = 80.0f;
@@ -476,6 +655,17 @@ void updateDensityFromNorm()
         }
     }
 
+    bool loadSample(const char* path)
+{
+    uint32_t sr = 0;
+    if (!loadWav16(path, sampleL, sampleR, sr))
+        return false;
+
+    sampleSR  = sr;
+    sampleLen = (int)sampleL.size();
+    return (sampleLen > 0);
+}
+
 
 
 
@@ -502,6 +692,28 @@ void spawnOneGrain(int note, int vel, float densityMul)
 
     Grain& g = allocGrain();
     g.active = true;
+
+    // If we have a loaded sample, start grains from it
+if (sampleLen > 0)
+{
+    const float base   = fStartPosNorm * float(sampleLen - 1);
+    const float spread = fPosSpreadNorm * float(sampleLen) * 0.5f;
+
+    // rand in [-1, +1]
+    const float r01 = float(rng = rng * 196314165u + 907633515u) / float(0xffffffffu); // 0..1
+    const float r11 = (r01 * 2.0f) - 1.0f;
+
+    float pos = base + r11 * spread;
+    if (pos < 0.0f) pos = 0.0f;
+    if (pos > float(sampleLen - 1)) pos = float(sampleLen - 1);
+
+    g.pos = pos;
+}
+else
+{
+    g.pos = 0.0f;
+}
+
 
     g.step = fPitchRate;
 
@@ -602,14 +814,22 @@ class SendNoteExamplePlugin : public Plugin
         paramVolume = 0,
         paramVelocityAmount,
         paramVelocityGrainSize,
+        paramStartPosition,
+        paramPositionSpread,
         paramCount
+    };
+
+    enum States {
+        stateSamplePath = 0,
+        stateCount
     };
 
 public:
     SendNoteExamplePlugin()
-    : Plugin(paramCount, 0, 0)
+    : Plugin(paramCount, 0, stateCount)  // 👈 her: stateCount i stedet for 0
     {
     }
+
 
 
 
@@ -695,7 +915,35 @@ void setParameterValue(uint32_t index, float value) override
         fVelocityGrainSize = value;
         fGran.setVelToGrainSize(value);
     }
+    
+    else if (index == paramStartPosition)
+    {
+        fGran.fStartPosNorm = value;      // 👈 forward til engine
+    }
+    else if (index == paramPositionSpread)
+    {
+        fGran.fPosSpreadNorm = value;     // 👈 forward til engine
+    }
 }
+void initState(uint32_t index, State& state) override
+{
+    if (index == stateSamplePath)
+    {
+        state.key = "samplePath";
+        state.defaultValue = "";
+        state.label = "Sample Path";
+    }
+}
+void setState(const char* key, const char* value) override
+{
+    if (std::strcmp(key, "samplePath") == 0)
+    {
+        fGran.setSamplePath(value);
+    }
+}
+
+
+
 
 
 
@@ -733,6 +981,24 @@ void initParameter(uint32_t index, Parameter& parameter) override
     parameter.name = "Velocity → Grain Size";
     parameter.symbol = "velGrainSize";
     parameter.ranges.def = 0.50f;
+    parameter.ranges.min = 0.0f;
+    parameter.ranges.max = 1.0f;
+}
+else if (index == paramStartPosition)
+{
+    parameter.hints = kParameterIsAutomatable;
+    parameter.name = "Start Position";
+    parameter.symbol = "startPos";
+    parameter.ranges.def = 0.0f;
+    parameter.ranges.min = 0.0f;
+    parameter.ranges.max = 1.0f;
+}
+else if (index == paramPositionSpread)
+{
+    parameter.hints = kParameterIsAutomatable;
+    parameter.name = "Position Spread";
+    parameter.symbol = "posSpread";
+    parameter.ranges.def = 0.0f;
     parameter.ranges.min = 0.0f;
     parameter.ranges.max = 1.0f;
 }
