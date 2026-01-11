@@ -14,7 +14,10 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include "DistrhoPlugin.hpp"
+#include "DistrhoPluginInfo.h"   // 👈 SKAL komme før
+#include "DistrhoPlugin.hpp"     // 👈 så Plugin-klassen får getState med
+
+
 
 #include <cmath>
 #include <cstring>
@@ -24,9 +27,137 @@
 #include <vector>
 #include <string>
 #include <fstream>
+#include <cstdlib>   // getenv
+#include "DrumCloudParams.hpp"
 
 
-//#define DRUMCLOUD_DEBUG 1
+// ------------------------------------------------------------
+// Sample path cache helpers (Bitwig-safe persistence)
+
+
+
+
+
+static std::string getCachePath()
+{
+    const char* home = std::getenv("HOME");
+    if (!home)
+        return "/tmp/drumcloud-sample-cache.txt";
+
+    return std::string(home) + "/.config/drumcloud-sample-cache.txt";
+}
+
+
+
+static bool cacheLookup(uint32_t id, std::string& outPath)
+{
+    const std::string fn = getCachePath();
+    std::FILE* fp = std::fopen(fn.c_str(), "r");
+    if (!fp) return false;
+
+    char line[4096];
+    while (std::fgets(line, sizeof(line), fp))
+    {
+        unsigned rid = 0;
+        char rpath[4000] = {0};
+
+        if (std::sscanf(line, "%u\t%3999[^\n]", &rid, rpath) == 2)
+        {
+            if ((uint32_t)rid == id)
+            {
+                outPath = rpath;
+                std::fclose(fp);
+                return true;
+            }
+        }
+    }
+
+    std::fclose(fp);
+    return false;
+}
+
+
+static bool cacheRead(uint32_t id, std::string& outPath)
+{
+    outPath.clear();
+
+    if (id == 0)
+        return false;
+
+    const std::string fn = getCachePath();
+
+    FILE* fp = std::fopen(fn.c_str(), "r");
+    if (!fp)
+        return false;
+
+    char line[4096];
+    while (std::fgets(line, sizeof(line), fp))
+    {
+        unsigned rid = 0;
+        char pbuf[4096] = {};
+
+        if (std::sscanf(line, "%u\t%4095[^\n]", &rid, pbuf) == 2)
+        {
+            if ((uint32_t)rid == id)
+            {
+                outPath = pbuf;
+                std::fclose(fp);
+                return true;
+            }
+        }
+    }
+
+    std::fclose(fp);
+    return false;
+}
+
+static void cacheWrite(uint32_t id, const std::string& path)
+{
+    if (id == 0 || path.empty())
+        return;
+
+    const std::string fn = getCachePath();
+
+    // best-effort: ensure ~/.config exists
+    if (const char* home = std::getenv("HOME"))
+    {
+        std::string cmd = "mkdir -p '" + std::string(home) + "/.config'";
+        int rc = std::system(cmd.c_str());
+        (void)rc;
+    }
+
+    if (std::FILE* fp = std::fopen(fn.c_str(), "a"))
+    {
+        std::fprintf(fp, "%u\t%s\n", (unsigned)id, path.c_str());
+        std::fclose(fp);
+    }
+}
+
+static uint32_t sampleIdFromPath(const char* path)
+{
+    if (path == nullptr || path[0] == '\0')
+        return 0;
+
+    uint32_t h = 2166136261u; // FNV-1a
+    for (const unsigned char* p = (const unsigned char*)path; *p; ++p)
+    {
+        h ^= (uint32_t)(*p);
+        h *= 16777619u;
+    }
+
+    h &= 0x00FFFFFFu; // 24-bit
+    if (h == 0) h = 1;
+    return h;
+}
+
+
+
+
+
+
+
+
+#define DRUMCLOUD_DEBUG 1
 
 #ifdef DRUMCLOUD_DEBUG
   #define DCLOG(...) std::fprintf(stderr, __VA_ARGS__)
@@ -37,7 +168,9 @@
 
 
 
+
 START_NAMESPACE_DISTRHO
+
 
 // -----------------------------------------------------------------------------------------------------------
 // Granular v1 (CPU-light) - loop source + snap-to markers (percussion oriented)
@@ -398,6 +531,7 @@ if (sampleLen > 0)
     const int32_t i0 = int32_t(g.pos);
     const float frac = g.pos - float(i0);
 
+
     if (i0 < 0 || i0 >= sampleLen)
     {
         // out of range -> kill grain
@@ -478,20 +612,39 @@ int sampleLen = 0;
 // ---- position random ----
 float fStartPosNorm   = 0.0f;  // 0..1
 float fPosSpreadNorm  = 0.0f;  // 0..1
+float fSnapMs = 10.0f;  // 0..20 ms (snap radius)
+
 
 bool setSamplePath(const char* path)
 {
+    if (FILE* fp = std::fopen("/tmp/drumcloud-restore.log", "a"))
+    {
+        std::fprintf(fp, "GranularEngine::setSamplePath('%s')\n",
+                     path ? path : "(null)");
+        std::fclose(fp);
+    }
+
     if (path == nullptr || path[0] == '\0')
         return false;
 
-    return loadSample(path); // loadSample er private, men vi er inde i klassen
+    const bool ok = loadSample(path);
+
+    if (FILE* fp = std::fopen("/tmp/drumcloud-restore.log", "a"))
+    {
+        std::fprintf(fp, "loadSample result=%d sampleLen=%d\n",
+                     (int)ok, (int)sampleLen);
+        std::fclose(fp);
+    }
+
+    return ok;
 }
 
 
 
-private:
-void updateDensityFromNorm()
 
+private:
+
+void updateDensityFromNorm()
 {
     const float minD = 2.0f;
     const float maxD = 80.0f;
@@ -503,13 +656,35 @@ void updateDensityFromNorm()
         fGrainsPerSec = 0.001f;
 }
 
-    void swapRemove(int idx)
-    {
-        const int last = activeCount - 1;
-        if (idx != last)
-            activeIdx[idx] = activeIdx[last];
-        activeCount = std::max(0, last);
-    }
+// ---- Random helpers (samme "kontrol-lag") ----
+
+static inline float rand01(uint32_t& rng)
+{
+    rng = rng * 1664525u + 1013904223u;
+    return float(rng >> 8) * (1.0f / 16777216.0f);
+}
+
+inline float computeStartNorm(uint32_t& rng) const
+{
+    const float base   = fStartPosNorm; // 0..1
+    const float spread = fPosSpreadNorm;  // 0..1
+
+    const float u = rand01(rng) * 2.0f - 1.0f; // [-1,1]
+    float s = base + u * spread;
+
+    if (s < 0.0f) s = 0.0f;
+    else if (s > 1.0f) s = 1.0f;
+    return s;
+}
+
+void swapRemove(int idx)
+{
+    const int last = activeCount - 1;
+    if (idx != last)
+        activeIdx[idx] = activeIdx[last];
+    activeCount = std::max(0, last);
+}
+
 
     float wrapPos(float p) const
     {
@@ -689,26 +864,96 @@ void updateDensityFromNorm()
 
     bool loadSample(const char* path)
 {
-    uint32_t sr = 0;
-    if (!loadWav16(path, sampleL, sampleR, sr))
+    uint32_t srFile = 0;
+    if (!loadWav16(path, sampleL, sampleR, srFile))
         return false;
 
-    sampleSR  = sr;
+    sampleSR  = srFile;
     sampleLen = (int)sampleL.size();
 
     if (sampleLen <= 0)
     {
-        // Nulstil waveform preview, så UI ikke viser gammelt data
         std::fill_n(waveMin, kWavePreviewSize, 0.0f);
         std::fill_n(waveMax, kWavePreviewSize, 0.0f);
+        markerCount = 0;
         return false;
     }
 
-    // 🔹 build waveform preview ONCE, after successful load
     buildWaveformPreview();
-
+    makeMarkersFromSample();
     return true;
 }
+
+void makeMarkersFromSample()
+{
+    markerCount = 0;
+    if (sampleLen <= 0) return;
+
+    const float srMark = (sampleSR > 0) ? float(sampleSR) : sr;
+
+    const float a = 0.01f;
+    float envPrev = 0.0f;
+    float env = 0.0f;
+
+    const int32_t minDist = int32_t(srMark * 0.030f);
+    int32_t lastMarker = -minDist;
+
+    float avg = 0.0f;
+    const float avgA = 0.0015f;
+
+    float currOn = 0.0f;
+
+    for (int32_t i = 0; i < sampleLen; ++i)
+    {
+        const float m = 0.5f * (sampleL[i] + sampleR[i]);
+        const float absM = std::fabs(m);
+
+        env += a * (absM - env);
+
+        const float d = env - envPrev;
+        envPrev = env;
+
+        const float on = (d > 0.0f) ? d : 0.0f;
+
+        avg += avgA * (on - avg);
+        currOn = on;
+
+        if (i < 2) continue;
+
+        const float thr = avg * 6.0f;
+
+        if (currOn > thr && (i - lastMarker) >= minDist)
+        {
+            if (markerCount < kMaxMarkers)
+            {
+                markers[markerCount++] = i;
+                lastMarker = i;
+            }
+        }
+    }
+
+    if (markerCount == 0)
+    {
+        const int32_t step = int32_t(srMark * 0.125f);
+        for (int32_t p = 0; p < sampleLen && markerCount < kMaxMarkers; p += step)
+            markers[markerCount++] = p;
+    }
+
+    if (markerCount > 1)
+        std::sort(markers, markers + markerCount);
+
+#ifdef DRUMCLOUD_DEBUG
+    DCLOG("[markers] count=%d first=%d last=%d\n",
+          markerCount,
+          markerCount > 0 ? markers[0] : -1,
+          markerCount > 0 ? markers[markerCount - 1] : -1);
+#endif
+}
+
+
+
+
+
 
 
 
@@ -732,36 +977,60 @@ void updateDensityFromNorm()
 
 void spawnOneGrain(int note, int vel, float densityMul)
 {
-    const int32_t sliceStart = 0;
-    const int32_t snapRadius = int32_t(sr * 0.010f);
     const float d = 1.0f * densityMul;
 
     Grain& g = allocGrain();
     g.active = true;
 
     // If we have a loaded sample, start grains from it
-if (sampleLen > 0)
+    if (sampleLen > 0)
+    {
+        const float base   = fStartPosNorm * float(sampleLen - 1);
+        const float spread = fPosSpreadNorm * float(sampleLen) * 0.5f;
+
+        // rand in [-1, +1]
+        const float r01 = float(rng = rng * 196314165u + 907633515u) / float(0xffffffffu); // 0..1
+        const float r11 = (r01 * 2.0f) - 1.0f;
+
+        float pos = base + r11 * spread;
+if (pos < 0.0f) pos = 0.0f;
+if (pos > float(sampleLen - 1)) pos = float(sampleLen - 1);
+
+// --- TRIN 3B: snap til marker indenfor radius ---
+const float srSnap = (sampleSR > 0) ? float(sampleSR) : sr;          // brug sampleSR hvis muligt
+const int32_t radius = std::max<int32_t>(0, int32_t(srSnap * (fSnapMs * 0.001f)));
+
+if (radius > 0 && markerCount > 0)
 {
-    const float base   = fStartPosNorm * float(sampleLen - 1);
-    const float spread = fPosSpreadNorm * float(sampleLen) * 0.5f;
+    const int32_t raw = int32_t(pos);
 
-    // rand in [-1, +1]
-    const float r01 = float(rng = rng * 196314165u + 907633515u) / float(0xffffffffu); // 0..1
-    const float r11 = (r01 * 2.0f) - 1.0f;
+    DCLOG("[snap] snapMs=%.2f radius=%d raw=%d markerCount=%d first=%d last=%d\n",
+          fSnapMs, int(radius), int(raw), int(markerCount),
+          markerCount > 0 ? int(markers[0]) : -1,
+          markerCount > 0 ? int(markers[markerCount - 1]) : -1);
 
-    float pos = base + r11 * spread;
-    if (pos < 0.0f) pos = 0.0f;
-    if (pos > float(sampleLen - 1)) pos = float(sampleLen - 1);
+    const int32_t snapped = snapBackward(raw, radius);
+    pos = float(snapped);
+if (pos < 0.0f) pos = 0.0f;
+if (pos > float(sampleLen - 1)) pos = float(sampleLen - 1);
 
-    g.pos = pos;
-}
-else
-{
-    g.pos = 0.0f;
 }
 
+
+
+g.pos = pos;
+
+    }
+    else
+    {
+        g.pos = 0.0f;
+    }
 
     g.step = fPitchRate;
+
+#if 0
+    const int32_t sliceStart = 0;
+    const int32_t snapRadius = int32_t(sr * 0.010f);
 
     const int32_t raw = sliceStart + int32_t((frand01(rng) - 0.5f) * 2.0f * snapRadius);
     const int32_t snapped = snapBackward(raw, snapRadius);
@@ -769,6 +1038,10 @@ else
     const float snapAmount = 0.85f;
     const float start = (1.0f - snapAmount) * float(raw) + snapAmount * float(snapped);
     g.pos = wrapPos(start);
+#endif
+
+
+    // g.pos = wrapPos(start);
 
     const float grainMsBase = 10.0f + frand01(rng) * 35.0f;
 
@@ -846,17 +1119,27 @@ if (activeCount < kMaxGrains)
 static constexpr int kWavePreviewSize = 1024;
 float waveMin[kWavePreviewSize];
 float waveMax[kWavePreviewSize];
-
     
-};
+}; // <-- slut på den forrige class/struct
 
 
 
+// ✅ Sæt dem HER (global scope, før plugin-klassen)
+static inline float idToNorm24(const uint32_t id24)
+{
+    const uint32_t v = (id24 & 0xFFFFFFu);
+    return float(v) / 16777215.0f;
+}
+
+static inline uint32_t norm24ToId(const float norm)
+{
+    const float n = (norm < 0.0f) ? 0.0f : (norm > 1.0f ? 1.0f : norm);
+    return (uint32_t)std::lround(n * 16777215.0f) & 0xFFFFFFu;
+}
 
 
 
-    
-
+// (så kommer plugin-klassen)
 class SendNoteExamplePlugin : public Plugin
 {
     enum Parameters {
@@ -865,6 +1148,8 @@ class SendNoteExamplePlugin : public Plugin
         paramVelocityGrainSize,
         paramStartPosition,
         paramPositionSpread,
+        paramSnapMs,
+        paramSamplePath,
         paramCount
     };
 
@@ -873,11 +1158,20 @@ class SendNoteExamplePlugin : public Plugin
         stateCount
     };
 
+
+    // ... resten af klassen (initState, getState, setState, osv.)
+
+
 public:
     SendNoteExamplePlugin()
-    : Plugin(paramCount, 0, stateCount)  // 👈 her: stateCount i stedet for 0
-    {
-    }
+    : Plugin(paramCount, 0, stateCount)
+{}
+
+
+
+
+
+
 
 
 
@@ -912,6 +1206,65 @@ protected:
         return "DISTRHO";
     }
 
+    // --------------------------------------------------------------------------------------------------------
+// State (sample persistence)
+
+// --- State readback (for host save) ---
+String getState(const char* key) const override
+{
+    if (std::strcmp(key, "samplePath") == 0)
+    {
+        // ingen logging
+
+        return String(fSamplePath.c_str());
+    }
+
+    return String();
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+void setState(const char* key, const char* value) override
+{
+    if (std::strcmp(key, "samplePath") == 0)
+    {
+        const std::string newPath = value ? value : "";
+
+        if (newPath != fSamplePath)
+        {
+            fSamplePath = newPath;
+            fPendingSampleLoad = !fSamplePath.empty();
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
    /**
       Get the plugin homepage.
     */
@@ -940,56 +1293,100 @@ float getParameterValue(uint32_t index) const override
 {
     if (index == paramVolume)
         return fVolume;
+
     if (index == paramVelocityAmount)
         return fVelocityAmount;
+
     if (index == paramVelocityGrainSize)
         return fVelocityGrainSize;
+
+    if (index == paramSamplePath)
+    return idToNorm24(fSampleId);
+
+
+    if (index == paramStartPosition)
+        return fGran.fStartPosNorm;
+
+    if (index == paramPositionSpread)
+        return fGran.fPosSpreadNorm;
+
+    if (index == paramSnapMs)
+        return fGran.fSnapMs;
 
     return 0.0f;
 }
 
 
+
+
+
 void setParameterValue(uint32_t index, float value) override
 {
-    if (index == paramVolume)
+    switch (index)
     {
+    case paramVolume:
         fVolume = value;
-    }
-    else if (index == paramVelocityAmount)
-    {
+        break;
+
+    case paramVelocityAmount:
         fVelocityAmount = value;
-    }
-    else if (index == paramVelocityGrainSize)
-    {
+        break;
+
+    case paramVelocityGrainSize:
         fVelocityGrainSize = value;
         fGran.setVelToGrainSize(value);
-    }
-    
-    else if (index == paramStartPosition)
+        break;
+
+    case paramStartPosition:
+        fGran.fStartPosNorm = value;
+        break;
+
+    case paramPositionSpread:
+        fGran.fPosSpreadNorm = value;
+        break;
+
+    case paramSnapMs:
+        fGran.fSnapMs = value;
+        break;
+
+    case paramSamplePath:
     {
-        fGran.fStartPosNorm = value;      // 👈 forward til engine
+        // value is normalized 0..1 -> convert to 24-bit id
+        const uint32_t id = norm24ToId(value);
+
+        // store id for restore flow in run()
+        fSampleId = id;
+        break;
     }
-    else if (index == paramPositionSpread)
-    {
-        fGran.fPosSpreadNorm = value;     // 👈 forward til engine
+
+    default:
+        break;
     }
 }
+
+
+
+
+
+
 void initState(uint32_t index, State& state) override
 {
-    if (index == stateSamplePath)
-    {
-        state.key = "samplePath";
-        state.defaultValue = "";
-        state.label = "Sample Path";
-    }
+    if (index != stateSamplePath)
+        return;
+
+    state.key = "samplePath";
+    state.defaultValue = "";
+    state.label = "Sample Path";
+    state.hints = kStateIsFilenamePath; // <-- din DPF har denne
 }
-void setState(const char* key, const char* value) override
-{
-    if (std::strcmp(key, "samplePath") == 0)
-    {
-        fGran.setSamplePath(value);
-    }
-}
+
+
+
+
+
+
+
+
 
 
 
@@ -1004,58 +1401,71 @@ void setState(const char* key, const char* value) override
 // 🔹 TRIN 3 – Parameter-definition
 void initParameter(uint32_t index, Parameter& parameter) override
 {
-    if (index == paramVolume)
-    {
-        parameter.hints = kParameterIsAutomatable;
+    parameter.hints = kParameterIsAutomatable; // default
+    parameter.ranges.min = 0.0f;
+    parameter.ranges.max = 1.0f;
+    parameter.ranges.def = 0.0f;
 
-        parameter.name = "Volume";
+    switch (index)
+    {
+    case paramVolume:
+        parameter.name   = "Volume";
         parameter.symbol = "volume";
         parameter.ranges.def = 0.8f;
-        parameter.ranges.min = 0.0f;
-        parameter.ranges.max = 1.0f;
-    }
-    else if (index == paramVelocityAmount)
-    {
-        parameter.hints = kParameterIsAutomatable;
+        break;
 
-        parameter.name = "Velocity → Density";
-        parameter.symbol = "velDensity";
-        parameter.unit = "%";
+    case paramVelocityAmount:
+        parameter.name   = "Velocity → Density";
+        parameter.symbol = "vel_density";
         parameter.ranges.def = 0.75f;
+        break;
+
+    case paramVelocityGrainSize:
+        parameter.name   = "Velocity → Grain Size";
+        parameter.symbol = "vel_grain";
+        parameter.ranges.def = 0.5f;
+        break;
+
+    case paramStartPosition:
+        parameter.name   = "Start Position";
+        parameter.symbol = "start_pos";
+        parameter.ranges.def = 0.0f;
+        break;
+
+    case paramPositionSpread:
+        parameter.name   = "Position Spread";
+        parameter.symbol = "pos_spread";
+        parameter.ranges.def = 0.0f;
+        break;
+
+    case paramSnapMs:
+        parameter.name   = "Start Snap (ms)";
+        parameter.symbol = "snap_ms";
         parameter.ranges.min = 0.0f;
-        parameter.ranges.max = 1.0f;
+        parameter.ranges.max = 50.0f;   // fx
+        parameter.ranges.def = 10.0f;   // fx
+        break;
+
+    case paramSamplePath:
+    parameter.name   = "Sample ID";
+    parameter.symbol = "sample_id";
+    parameter.hints  = kParameterIsHidden | kParameterIsAutomatable;
+    parameter.ranges.min = 0.0f;
+    parameter.ranges.max = 1.0f;   // ✅ IMPORTANT: normalized
+    parameter.ranges.def = 0.0f;
+    break;
+
     }
-    else if (index == paramVelocityGrainSize)
-{
-    parameter.hints = kParameterIsAutomatable;
-    parameter.name = "Velocity → Grain Size";
-    parameter.symbol = "velGrainSize";
-    parameter.ranges.def = 0.50f;
-    parameter.ranges.min = 0.0f;
-    parameter.ranges.max = 1.0f;
-}
-else if (index == paramStartPosition)
-{
-    parameter.hints = kParameterIsAutomatable;
-    parameter.name = "Start Position";
-    parameter.symbol = "startPos";
-    parameter.ranges.def = 0.0f;
-    parameter.ranges.min = 0.0f;
-    parameter.ranges.max = 1.0f;
-}
-else if (index == paramPositionSpread)
-{
-    parameter.hints = kParameterIsAutomatable;
-    parameter.name = "Position Spread";
-    parameter.symbol = "posSpread";
-    parameter.ranges.def = 0.0f;
-    parameter.ranges.min = 0.0f;
-    parameter.ranges.max = 1.0f;
 }
 
 
 
-}
+
+
+
+
+
+
 
 
 
@@ -1089,55 +1499,118 @@ else if (index == paramPositionSpread)
     float* outL = outputs[0];
     float* outR = outputs[1];
 
-    if (!fGranInit) {
+    // --- init engine if needed ---
+    if (!fGranInit || fLastSR != getSampleRate())
+    {
         fGran.init(getSampleRate());
+        fLastSR = getSampleRate();
         fGranInit = true;
+        // ❌ ingen sample-load her
     }
 
-    // clear outputs
-    for (uint32_t f = 0; f < frames; ++f) {
-        outL[f] = 0.0f;
-        outR[f] = 0.0f;
+    // --- restore once after engine init (Bitwig workaround) ---
+    if (fGranInit && !fTriedRestore)
+    {
+        fTriedRestore = true;
+
+        if (FILE* fp = std::fopen("/tmp/drumcloud-restore.log", "a"))
+        {
+            std::fprintf(fp, "restore-check: fSampleId=%u samplePathEmpty=%d\n",
+                         (unsigned)fSampleId, (int)fSamplePath.empty());
+            std::fclose(fp);
+        }
+
+        // If path is empty, try to recover it from the hidden param id -> cache
+        if (fSamplePath.empty())
+        {
+            const uint32_t id = norm24ToId(getParameterValue(paramSamplePath));
+            if (id != 0)
+            {
+                std::string p;
+                if (cacheRead(id, p) && !p.empty())
+                {
+                    fSamplePath = p;
+                    fPendingSampleLoad = true;
+
+                    if (FILE* fp = std::fopen("/tmp/drumcloud-restore.log", "a"))
+                    {
+                        std::fprintf(fp, "run(): restored path from id=%u -> '%s'\n",
+                                     (unsigned)id, fSamplePath.c_str());
+                        std::fclose(fp);
+                    }
+                }
+            }
+        }
     }
 
-    // MIDI -> trigger / noteoff
+    // --- load sample if pending (single place) ---
+    if (fGranInit && fPendingSampleLoad && !fSamplePath.empty())
+    {
+        if (FILE* fp = std::fopen("/tmp/drumcloud-restore.log", "a"))
+        {
+            std::fprintf(fp, "run(): loading samplePath='%s'\n", fSamplePath.c_str());
+            std::fclose(fp);
+        }
+
+        fGran.setSamplePath(fSamplePath.c_str());
+        fPendingSampleLoad = false;
+    }
+
+    // ... resten af din midi + process ...
+   
+        // --- handle MIDI -> granular engine ---
     for (uint32_t i = 0; i < midiEventCount; ++i)
     {
-        const MidiEvent& ev(midiEvents[i]);
-        if (ev.size < 3)
-            continue;
+        const MidiEvent& ev = midiEvents[i];
+        if (ev.size < 3) continue;
 
-        const uint8_t status = ev.data[0] & 0xF0;
-        const uint8_t note   = ev.data[1] & 0x7F;
-        const uint8_t vel    = ev.data[2] & 0x7F;
+        const uint8_t st   = ev.data[0] & 0xF0;
+        const uint8_t note = ev.data[1] & 0x7F;
+        const uint8_t vel  = ev.data[2] & 0x7F;
 
-        if (status == 0x90 && vel > 0) // Note On
+        if (st == 0x90 && vel > 0)
             fGran.trigger(note, vel);
-        else if (status == 0x80 || (status == 0x90 && vel == 0)) // Note Off (inkl NoteOn vel=0)
+        else if (st == 0x80 || (st == 0x90 && vel == 0))
             fGran.noteOff(note);
     }
 
-    // render grains
+    // --- render audio ---
+    std::memset(outL, 0, sizeof(float) * frames);
+    std::memset(outR, 0, sizeof(float) * frames);
+
     fGran.process(outL, outR, frames);
 
-    // Apply output volume (simple taper)
+    // --- apply output gain ---
     const float vol = fVolume * fVolume;
-    for (uint32_t f = 0; f < frames; ++f) {
+    for (uint32_t f = 0; f < frames; ++f)
+    {
         outL[f] *= vol;
         outR[f] *= vol;
     }
+
 }
 
 
 
 
+
+
 private:
+    std::string fSamplePath;   // 👈 her (persistet værdi)
+    uint32_t fSampleId = 0;
+
+
     GranularEngine fGran;
     bool fGranInit = false;
+
     float fVolume = 0.8f;
-    float fVelocityAmount = 0.75f;      // velocity → density
-    float fVelocityGrainSize = 0.5f;    // velocity → grain size  👈 5C.2
-    
+    float fVelocityAmount = 0.75f;
+    float fVelocityGrainSize = 0.5f;
+    bool   fPendingSampleLoad = false;
+    double fLastSR = 0.0;
+    bool fTriedRestore = false;
+
+
 
 
 

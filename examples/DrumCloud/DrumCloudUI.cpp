@@ -2,66 +2,260 @@
 
 #include <cstring>
 #include <cstdio>
+#include <cstdarg>
+
 #include <cstdint>
 #include <vector>
 #include <algorithm>
+#include <string>
+#include <cstdlib>
+#include <cmath>
 #include <GL/gl.h>
 
-START_NAMESPACE_DISTRHO
+#include "DrumCloudParams.hpp"
+
+// ------------------------------------------------------------
+// UI debug logger
+// ------------------------------------------------------------
+static void uiLog(const char* fmt, ...)
+{
+    FILE* f = std::fopen("/tmp/drumcloud-ui.log", "a");
+    if (!f) return;
+
+    va_list args;
+    va_start(args, fmt);
+    std::vfprintf(f, fmt, args);
+    std::fprintf(f, "\n");
+    va_end(args);
+
+    std::fclose(f);
+}
+
+
+
+// ------------------------------------------------------------
+// UI-local sample path cache helpers (Bitwig-safe persistence)
+
+static constexpr uint32_t kMax24 = 0xFFFFFFu;
+
+static float idToNorm24(uint32_t id)
+{
+    id &= kMax24;
+    // encode to the *center* of the bucket to avoid rounding drift
+    return (float(id) + 0.5f) / float(kMax24);
+}
+
+static uint32_t norm24ToId(float v)
+{
+    if (v <= 0.0f) return 0;
+    if (v >= 1.0f) return kMax24;
+
+    // inverse of idToNorm24: v = (id + 0.5) / kMax24
+    // => id ≈ v*kMax24 - 0.5
+    const float f = v * float(kMax24) - 0.5f;
+
+    // round to nearest integer id
+    const uint32_t id = (uint32_t)std::lround(f) & kMax24;
+    return id;
+}
+
+
+
+static uint32_t sampleIdFromPath(const char* path)
+{
+    if (path == nullptr || path[0] == '\0')
+        return 0;
+
+    uint32_t h = 2166136261u; // FNV-1a
+    for (const unsigned char* p = (const unsigned char*)path; *p; ++p)
+    {
+        h ^= (uint32_t)(*p);
+        h *= 16777619u;
+    }
+
+    h &= 0x00FFFFFFu; // 24-bit
+    if (h == 0) h = 1;
+    return h;
+}
+
+
+static uint32_t fnv1a32(const char* s)
+{
+    uint32_t h = 2166136261u;
+    for (const unsigned char* p = (const unsigned char*)s; *p; ++p)
+    {
+        h ^= (uint32_t)(*p);
+        h *= 16777619u;
+    }
+    if (h == 0) h = 1;
+    return h;
+}
+
+
+
+static std::string getCachePath()
+{
+    const char* home = std::getenv("HOME");
+    if (!home)
+        return "/tmp/drumcloud-sample-cache.txt";
+
+    return std::string(home) + "/.config/drumcloud-sample-cache.txt";
+}
+
+static void cacheWrite(uint32_t id, const std::string& path)
+{
+    const std::string fn = getCachePath();
+    std::FILE* fp = std::fopen(fn.c_str(), "a");
+    if (!fp) return;
+
+    std::fprintf(fp, "%u\t%s\n", (unsigned)id, path.c_str());
+    std::fclose(fp);
+}
+static bool cacheRead(uint32_t id, std::string& outPath)
+{
+    outPath.clear();
+    if (id == 0) return false;
+
+    const std::string fn = getCachePath();
+    FILE* fp = std::fopen(fn.c_str(), "r");
+    if (!fp) return false;
+
+    char line[4096];
+    while (std::fgets(line, sizeof(line), fp))
+    {
+        unsigned rid = 0;
+        char pbuf[4096] = {};
+
+        if (std::sscanf(line, "%u\t%4095[^\n]", &rid, pbuf) == 2)
+        {
+            if ((uint32_t)rid == id)
+            {
+                outPath = pbuf;
+                std::fclose(fp);
+                return true;
+            }
+        }
+    }
+
+    std::fclose(fp);
+    return false;
+}
+static bool cacheReadNearby(uint32_t id, std::string& outPath)
+{
+    // prøv først præcis id
+    if (cacheRead(id, outPath) && !outPath.empty())
+        return true;
+
+    // prøv nabo-id'er (typisk float/round drift)
+    if (id > 0 && cacheRead(id - 1u, outPath) && !outPath.empty())
+        return true;
+
+    if (id < 0xFFFFFFu && cacheRead(id + 1u, outPath) && !outPath.empty())
+        return true;
+
+    return false;
+}
+
+
+
+namespace DISTRHO {
+
 
 class DrumCloudUI : public UI
 {
 public:
     DrumCloudUI()
-        : UI(360, 90) // størrelse på vinduet
+        : UI(360, 90)
     {
+        uiLog("----- UI START -----");
     }
+
+    void parameterChanged(uint32_t index, float value) override;
+    void stateChanged(const char* key, const char* value) override;
+
+protected:
+    void onDisplay() override;
+    bool onMouse(const MouseEvent& ev) override;
+
+    // ---- data ----
     static constexpr int kWavePreviewSize = 1024;
     float fWaveMin[kWavePreviewSize]{};
     float fWaveMax[kWavePreviewSize]{};
     bool  fWaveValid = false;
 
+    float fSamplePing = 0.0f;
+    std::string fSamplePath;
+    bool fRestoringFromParam = false;
+
     bool loadWavePreviewFromWav(const char* path);
 
-protected:
-    void onDisplay() override
-{
-    if (!fWaveValid)
-        return;
+};
 
+void DrumCloudUI::onDisplay()
+{
     const float W = (float)getWidth();
     const float H = (float)getHeight();
     const float mid = H * 0.5f;
 
-    // DGL / OpenGL simple waveform: vertical lines
+    // ---- background ----
+    glDisable(GL_TEXTURE_2D);
+    glClearColor(0.06f, 0.06f, 0.07f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // ---- midline (always) ----
     glLineWidth(1.0f);
-    glColor4f(0.85f, 0.9f, 1.0f, 1.0f);
+    glColor4f(0.25f, 0.25f, 0.28f, 1.0f);
     glBegin(GL_LINES);
+        glVertex2f(0.0f, H - mid);
+        glVertex2f(W,   H - mid);
+    glEnd();
 
-    for (int i = 0; i < kWavePreviewSize; ++i)
+    // ---- if we have waveform, draw it ----
+    if (fWaveValid)
     {
-        const float x  = (float)i / (kWavePreviewSize - 1) * W;
-        const float y1 = mid - fWaveMin[i] * mid;
-        const float y2 = mid - fWaveMax[i] * mid;
+        glLineWidth(1.0f);
+        glColor4f(0.85f, 0.9f, 1.0f, 1.0f);
+        glBegin(GL_LINES);
 
-        // Convert UI coords to GL coords if needed:
-        // In DPF UI, origin is usually top-left in UI helpers,
-        // but raw GL uses bottom-left. So flip Y:
-        const float gy1 = H - y1;
-        const float gy2 = H - y2;
+        for (int i = 0; i < kWavePreviewSize; ++i)
+        {
+            const float x  = (float)i / (kWavePreviewSize - 1) * W;
+            const float y1 = mid - fWaveMin[i] * mid;
+            const float y2 = mid - fWaveMax[i] * mid;
 
-        glVertex2f(x, gy1);
-        glVertex2f(x, gy2);
+            const float gy1 = H - y1;
+            const float gy2 = H - y2;
+
+            glVertex2f(x, gy1);
+            glVertex2f(x, gy2);
+        }
+
+        glEnd();
+        return;
     }
 
+    // ---- placeholder (no waveform yet) ----
+    glColor4f(0.15f, 0.15f, 0.18f, 1.0f);
+    glBegin(GL_QUADS);
+        glVertex2f(12.0f, H - 12.0f);
+        glVertex2f(W - 12.0f, H - 12.0f);
+        glVertex2f(W - 12.0f, 12.0f);
+        glVertex2f(12.0f, 12.0f);
+    glEnd();
+
+    glColor4f(0.7f, 0.7f, 0.8f, 1.0f);
+    glBegin(GL_LINES);
+        glVertex2f(W*0.5f - 18.0f, H*0.5f);
+        glVertex2f(W*0.5f + 18.0f, H*0.5f);
+        glVertex2f(W*0.5f, H*0.5f - 18.0f);
+        glVertex2f(W*0.5f, H*0.5f + 18.0f);
     glEnd();
 }
 
 
 
-    bool onMouse(const MouseEvent& ev) override
+    bool DrumCloudUI::onMouse(const MouseEvent& ev)
 {
-    // Venstre klik -> åbn host file dialog for state key "samplePath"
     if (ev.press && ev.button == 1)
     {
         requestStateFile("samplePath");
@@ -70,27 +264,90 @@ protected:
     return false;
 }
 
-void stateChanged(const char* key, const char* value) override
-{
-    if (std::strcmp(key, "samplePath") == 0 && value && value[0] != '\0')
-    {
-        loadWavePreviewFromWav(value);
-        repaint();
-        return;
-    }
 
-    (void)key;
-    (void)value;
+void DrumCloudUI::stateChanged(const char* key, const char* value)
+{
+    uiLog("[UI] stateChanged key='%s' value='%s'",
+          key, value ? value : "(null)");
+
+    if (std::strcmp(key, "samplePath") != 0)
+        return;
+
+    // Cancel / tom sti
+    if (value == nullptr || value[0] == '\0')
+        return;
+
+    // UI skal vide at der er sample (til + tegnet)
+    fSamplePath = value;
+    uiLog("[UI] samplePath selected='%s'", value);
+
+
+    // cache til id->path restore
+    uint32_t id = sampleIdFromPath(value);
+    id &= 0xFFFFFFu;
+
+    uiLog("[UI] cacheWrite id=%u path='%s'", id, value);
+    cacheWrite(id, value);
+
+
+    editParameter(paramSamplePath, true);
+    setParameterValue(paramSamplePath, idToNorm24(id));
+    editParameter(paramSamplePath, false);
+
+
+
+    // UI preview
+    loadWavePreviewFromWav(value);
+    repaint();
 }
 
 
-};
+
+
+
+
+void DrumCloudUI::parameterChanged(uint32_t index, float value)
+{
+    uiLog("[UI] parameterChanged index=%u value=%f", index, value);
+
+    if (index != paramSamplePath)
+        return;
+
+    const uint32_t id = norm24ToId(value) & 0xFFFFFFu;
+    uiLog("[UI] paramSamplePath id=%u", id);
+
+    if (id == 0)
+        return;
+
+    std::string p;
+    const bool ok = cacheReadNearby(id, p);
+    uiLog("[UI] cacheReadNearby ok=%d path='%s'", ok, p.c_str());
+
+    if (ok && !p.empty())
+    {
+        loadWavePreviewFromWav(p.c_str());
+        repaint();
+    }
+    setState("samplePath", p.c_str());   // ✅ fortæl DSP/host igen ved restore
+
+}
+
+
+
+
+
+
+
+
 static uint32_t readLE32(const uint8_t* p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 static uint16_t readLE16(const uint8_t* p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
+
+
+
 
 bool DrumCloudUI::loadWavePreviewFromWav(const char* path)
 {
@@ -179,9 +436,15 @@ bool DrumCloudUI::loadWavePreviewFromWav(const char* path)
     return true;
 }
 
+
+
 UI* createUI()
 {
     return new DrumCloudUI();
 }
 
-END_NAMESPACE_DISTRHO
+} // namespace DISTRHO
+
+
+
+
