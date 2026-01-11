@@ -173,15 +173,25 @@ public:
     void parameterChanged(uint32_t index, float value) override;
     void stateChanged(const char* key, const char* value) override;
 
+    
+
 protected:
     void onDisplay() override;
     bool onMouse(const MouseEvent& ev) override;
+    bool onMotion(const MotionEvent& ev) override;
+
 
     // ---- data ----
     static constexpr int kWavePreviewSize = 1024;
     float fWaveMin[kWavePreviewSize]{};
     float fWaveMax[kWavePreviewSize]{};
     bool  fWaveValid = false;
+    // ---- Release UI ----
+    float fReleaseMsUi = 250.0f;
+    bool  fDragRelease = false;
+    float fDragStartX = 0.0f;
+    float fDragStartMs = 250.0f;
+
 
     float fSamplePing = 0.0f;
     std::string fSamplePath;
@@ -212,28 +222,28 @@ void DrumCloudUI::onDisplay()
 
     // ---- if we have waveform, draw it ----
     if (fWaveValid)
+{
+    glLineWidth(1.0f);
+    glColor4f(0.85f, 0.9f, 1.0f, 1.0f);
+    glBegin(GL_LINES);
+
+    for (int i = 0; i < kWavePreviewSize; ++i)
     {
-        glLineWidth(1.0f);
-        glColor4f(0.85f, 0.9f, 1.0f, 1.0f);
-        glBegin(GL_LINES);
+        const float x  = (float)i / (kWavePreviewSize - 1) * W;
+        const float y1 = mid - fWaveMin[i] * mid;
+        const float y2 = mid - fWaveMax[i] * mid;
 
-        for (int i = 0; i < kWavePreviewSize; ++i)
-        {
-            const float x  = (float)i / (kWavePreviewSize - 1) * W;
-            const float y1 = mid - fWaveMin[i] * mid;
-            const float y2 = mid - fWaveMax[i] * mid;
+        const float gy1 = H - y1;
+        const float gy2 = H - y2;
 
-            const float gy1 = H - y1;
-            const float gy2 = H - y2;
-
-            glVertex2f(x, gy1);
-            glVertex2f(x, gy2);
-        }
-
-        glEnd();
-        return;
+        glVertex2f(x, gy1);
+        glVertex2f(x, gy2);
     }
 
+    glEnd();
+}
+else
+{
     // ---- placeholder (no waveform yet) ----
     glColor4f(0.15f, 0.15f, 0.18f, 1.0f);
     glBegin(GL_QUADS);
@@ -254,15 +264,158 @@ void DrumCloudUI::onDisplay()
 
 
 
+
+    // ---- Release slider (simple bar) ----
+{
+    const float minMs = 5.0f;
+    const float maxMs = 5000.0f;
+
+    float t = 0.0f;
+    if (maxMs > minMs)
+        t = (fReleaseMsUi - minMs) / (maxMs - minMs);
+
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+
+    // placering (bunden af UI)
+    const float x = 10.0f;
+    const float y = 72.0f;
+    const float w = 160.0f;
+    const float h = 12.0f;
+
+    // baggrund
+    glColor4f(0.15f, 0.15f, 0.18f, 1.0f);
+    glBegin(GL_QUADS);
+        glVertex2f(x,     H - y);
+        glVertex2f(x + w, H - y);
+        glVertex2f(x + w, H - (y + h));
+        glVertex2f(x,     H - (y + h));
+    glEnd();
+
+    // fyld (værdi)
+    glColor4f(0.45f, 0.75f, 1.0f, 1.0f);
+    glBegin(GL_QUADS);
+        glVertex2f(x,           H - y);
+        glVertex2f(x + w * t,   H - y);
+        glVertex2f(x + w * t,   H - (y + h));
+        glVertex2f(x,           H - (y + h));
+    glEnd();
+
+    // outline
+    glColor4f(0.35f, 0.35f, 0.40f, 1.0f);
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(x,     H - y);
+        glVertex2f(x + w, H - y);
+        glVertex2f(x + w, H - (y + h));
+        glVertex2f(x,     H - (y + h));
+    glEnd();
+}
+
+}
+
+
+
+
+    bool DrumCloudUI::onMotion(const MotionEvent& ev)
+{
+    if (!fDragRelease)
+        return false;
+
+    const float minMs = 5.0f;
+    const float maxMs = 5000.0f;
+
+    const float x = 10.0f;
+    const float w = 160.0f;
+
+    const float mx = (float)ev.pos.getX();
+    const float dx = mx - fDragStartX;
+
+    float t0 = 0.0f;
+    if (maxMs > minMs)
+        t0 = (fDragStartMs - minMs) / (maxMs - minMs);
+
+    float t = t0 + (dx / w);
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+
+    const float newMs = minMs + t * (maxMs - minMs);
+    fReleaseMsUi = newMs;
+
+    editParameter(paramReleaseMs, true);
+    setParameterValue(paramReleaseMs, newMs);
+    editParameter(paramReleaseMs, false);
+
+    repaint();
+    return true;
+}
+
     bool DrumCloudUI::onMouse(const MouseEvent& ev)
 {
-    if (ev.press && ev.button == 1)
+    // samme rect som i onDisplay
+    const float x = 10.0f;
+    const float y = 72.0f;
+    const float w = 160.0f;
+    const float h = 12.0f;
+
+    const float mx = (float)ev.pos.getX();
+    const float my = (float)ev.pos.getY();
+
+    const float H = (float)getHeight();
+    const float ry0 = H - y;
+    const float ry1 = H - (y + h);
+
+    const bool hitRelease =
+        (mx >= x && mx <= x + w) &&
+        (my >= ry1 && my <= ry0);
+
+    // Left click press
+    if (ev.button == 1 && ev.press)
     {
+        if (hitRelease)
+        {
+            fDragRelease = true;
+            fDragStartX  = mx;
+            fDragStartMs = fReleaseMsUi;
+
+            // klik sætter direkte værdi
+            const float minMs = 5.0f;
+            const float maxMs = 5000.0f;
+
+            float t = (mx - x) / w;
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+
+            const float newMs = minMs + t * (maxMs - minMs);
+            fReleaseMsUi = newMs;
+
+            editParameter(paramReleaseMs, true);
+            setParameterValue(paramReleaseMs, newMs);
+            editParameter(paramReleaseMs, false);
+
+            repaint();
+            return true;
+        }
+
+        // ellers: sample file dialog
         requestStateFile("samplePath");
         return true;
     }
+
+    // Mouse release: stop drag (DPF sender typisk ev.press=false for release)
+    if (ev.button == 1 && !ev.press)
+    {
+        if (fDragRelease)
+        {
+            fDragRelease = false;
+            return true;
+        }
+    }
+
     return false;
 }
+
+    
+
 
 
 void DrumCloudUI::stateChanged(const char* key, const char* value)
@@ -329,6 +482,14 @@ void DrumCloudUI::parameterChanged(uint32_t index, float value)
         repaint();
     }
     setState("samplePath", p.c_str());   // ✅ fortæl DSP/host igen ved restore
+
+    if (index == paramReleaseMs)
+    {
+    fReleaseMsUi = value;  // value er i ms (5..5000), fordi param-range er ms
+    repaint();
+    return;
+    }
+
 
 }
 

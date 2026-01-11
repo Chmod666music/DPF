@@ -4,6 +4,7 @@
 enum Parameters : uint32_t
 {
     paramVolume = 0,
+    paramReleaseMs,        // 🎛 Release (ms)
     paramVelocityAmount,
     paramVelocityGrainSize,
     paramStartPosition,
@@ -12,3 +13,4 @@ enum Parameters : uint32_t
     paramSamplePath,
     paramCount
 };
+

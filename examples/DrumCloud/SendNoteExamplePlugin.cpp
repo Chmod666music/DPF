@@ -387,6 +387,13 @@ void setReleaseMs(float ms)
     fReleaseMs = ms;
 }
 
+float getReleaseMs() const noexcept
+{
+    return fReleaseMs;
+}
+
+
+
 
 
 
@@ -1141,9 +1148,11 @@ static inline uint32_t norm24ToId(const float norm)
 
 // (så kommer plugin-klassen)
 class SendNoteExamplePlugin : public Plugin
+
 {
     enum Parameters {
         paramVolume = 0,
+        paramReleaseMs, 
         paramVelocityAmount,
         paramVelocityGrainSize,
         paramStartPosition,
@@ -1294,6 +1303,9 @@ float getParameterValue(uint32_t index) const override
     if (index == paramVolume)
         return fVolume;
 
+    if (index == paramReleaseMs)
+        return fGran.getReleaseMs();
+
     if (index == paramVelocityAmount)
         return fVelocityAmount;
 
@@ -1301,8 +1313,7 @@ float getParameterValue(uint32_t index) const override
         return fVelocityGrainSize;
 
     if (index == paramSamplePath)
-    return idToNorm24(fSampleId);
-
+        return idToNorm24(fSampleId);
 
     if (index == paramStartPosition)
         return fGran.fStartPosNorm;
@@ -1327,6 +1338,11 @@ void setParameterValue(uint32_t index, float value) override
     case paramVolume:
         fVolume = value;
         break;
+
+    case paramReleaseMs:
+        fGran.setReleaseMs(value);
+        break;
+
 
     case paramVelocityAmount:
         fVelocityAmount = value;
@@ -1414,6 +1430,16 @@ void initParameter(uint32_t index, Parameter& parameter) override
         parameter.ranges.def = 0.8f;
         break;
 
+    case paramReleaseMs:
+        parameter.name  = "Release";
+        parameter.symbol = "release";
+        parameter.unit  = "ms";
+        parameter.ranges.min = 5.0f;
+        parameter.ranges.max = 5000.0f;
+        parameter.ranges.def = 250.0f;
+        parameter.hints = kParameterIsAutomatable;
+        break;
+
     case paramVelocityAmount:
         parameter.name   = "Velocity → Density";
         parameter.symbol = "vel_density";
@@ -1454,6 +1480,9 @@ void initParameter(uint32_t index, Parameter& parameter) override
     parameter.ranges.max = 1.0f;   // ✅ IMPORTANT: normalized
     parameter.ranges.def = 0.0f;
     break;
+
+    
+
 
     }
 }
@@ -1609,6 +1638,7 @@ private:
     bool   fPendingSampleLoad = false;
     double fLastSR = 0.0;
     bool fTriedRestore = false;
+    float fReleaseMs = 250.0f; // default release i ms
 
 
 
