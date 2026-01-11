@@ -157,7 +157,7 @@ static uint32_t sampleIdFromPath(const char* path)
 
 
 
-#define DRUMCLOUD_DEBUG 1
+#define DRUMCLOUD_DEBUG 0
 
 #ifdef DRUMCLOUD_DEBUG
   #define DCLOG(...) std::fprintf(stderr, __VA_ARGS__)
@@ -624,24 +624,28 @@ float fSnapMs = 10.0f;  // 0..20 ms (snap radius)
 
 bool setSamplePath(const char* path)
 {
+    #if DRUMCLOUD_DEBUG
     if (FILE* fp = std::fopen("/tmp/drumcloud-restore.log", "a"))
     {
-        std::fprintf(fp, "GranularEngine::setSamplePath('%s')\n",
-                     path ? path : "(null)");
-        std::fclose(fp);
+    std::fprintf(fp, "...\n");
+    std::fclose(fp);
     }
+    #endif
+
 
     if (path == nullptr || path[0] == '\0')
         return false;
 
     const bool ok = loadSample(path);
 
+    #if DRUMCLOUD_DEBUG
     if (FILE* fp = std::fopen("/tmp/drumcloud-restore.log", "a"))
     {
-        std::fprintf(fp, "loadSample result=%d sampleLen=%d\n",
-                     (int)ok, (int)sampleLen);
-        std::fclose(fp);
+    std::fprintf(fp, "...\n");
+    std::fclose(fp);
     }
+    #endif
+
 
     return ok;
 }
@@ -1542,12 +1546,14 @@ void initParameter(uint32_t index, Parameter& parameter) override
     {
         fTriedRestore = true;
 
-        if (FILE* fp = std::fopen("/tmp/drumcloud-restore.log", "a"))
-        {
-            std::fprintf(fp, "restore-check: fSampleId=%u samplePathEmpty=%d\n",
-                         (unsigned)fSampleId, (int)fSamplePath.empty());
-            std::fclose(fp);
-        }
+        #if DRUMCLOUD_DEBUG
+    if (FILE* fp = std::fopen("/tmp/drumcloud-restore.log", "a"))
+    {
+    std::fprintf(fp, "...\n");
+    std::fclose(fp);
+    }
+    #endif
+
 
         // If path is empty, try to recover it from the hidden param id -> cache
         if (fSamplePath.empty())
@@ -1561,12 +1567,14 @@ void initParameter(uint32_t index, Parameter& parameter) override
                     fSamplePath = p;
                     fPendingSampleLoad = true;
 
+                    #if DRUMCLOUD_DEBUG
                     if (FILE* fp = std::fopen("/tmp/drumcloud-restore.log", "a"))
                     {
-                        std::fprintf(fp, "run(): restored path from id=%u -> '%s'\n",
-                                     (unsigned)id, fSamplePath.c_str());
-                        std::fclose(fp);
+                    std::fprintf(fp, "...\n");
+                    std::fclose(fp);
                     }
+                    #endif
+
                 }
             }
         }
@@ -1575,11 +1583,14 @@ void initParameter(uint32_t index, Parameter& parameter) override
     // --- load sample if pending (single place) ---
     if (fGranInit && fPendingSampleLoad && !fSamplePath.empty())
     {
+        #if DRUMCLOUD_DEBUG
         if (FILE* fp = std::fopen("/tmp/drumcloud-restore.log", "a"))
         {
-            std::fprintf(fp, "run(): loading samplePath='%s'\n", fSamplePath.c_str());
-            std::fclose(fp);
+        std::fprintf(fp, "...\n");
+        std::fclose(fp);
         }
+        #endif
+
 
         fGran.setSamplePath(fSamplePath.c_str());
         fPendingSampleLoad = false;

@@ -1,3 +1,5 @@
+#define DRUMCLOUD_UI_DEBUG 0
+
 #include "DistrhoUI.hpp"
 
 #include <cstring>
@@ -17,19 +19,25 @@
 // ------------------------------------------------------------
 // UI debug logger
 // ------------------------------------------------------------
-static void uiLog(const char* fmt, ...)
+static void uilog(const char* fmt, ...)
 {
+#if !DRUMCLOUD_UI_DEBUG
+    (void)fmt;
+    return;
+#else
     FILE* f = std::fopen("/tmp/drumcloud-ui.log", "a");
     if (!f) return;
 
     va_list args;
     va_start(args, fmt);
     std::vfprintf(f, fmt, args);
-    std::fprintf(f, "\n");
     va_end(args);
 
+    std::fprintf(f, "\n");
     std::fclose(f);
+#endif
 }
+
 
 
 
@@ -167,7 +175,7 @@ public:
     DrumCloudUI()
         : UI(360, 90)
     {
-        uiLog("----- UI START -----");
+        uilog("----- UI START -----");
     }
 
     void parameterChanged(uint32_t index, float value) override;
@@ -324,7 +332,6 @@ else
     const float minMs = 5.0f;
     const float maxMs = 5000.0f;
 
-    const float x = 10.0f;
     const float w = 160.0f;
 
     const float mx = (float)ev.pos.getX();
@@ -420,7 +427,7 @@ else
 
 void DrumCloudUI::stateChanged(const char* key, const char* value)
 {
-    uiLog("[UI] stateChanged key='%s' value='%s'",
+    uilog("[UI] stateChanged key='%s' value='%s'",
           key, value ? value : "(null)");
 
     if (std::strcmp(key, "samplePath") != 0)
@@ -432,14 +439,14 @@ void DrumCloudUI::stateChanged(const char* key, const char* value)
 
     // UI skal vide at der er sample (til + tegnet)
     fSamplePath = value;
-    uiLog("[UI] samplePath selected='%s'", value);
+    uilog("[UI] samplePath selected='%s'", value);
 
 
     // cache til id->path restore
     uint32_t id = sampleIdFromPath(value);
     id &= 0xFFFFFFu;
 
-    uiLog("[UI] cacheWrite id=%u path='%s'", id, value);
+    uilog("[UI] cacheWrite id=%u path='%s'", id, value);
     cacheWrite(id, value);
 
 
@@ -461,20 +468,20 @@ void DrumCloudUI::stateChanged(const char* key, const char* value)
 
 void DrumCloudUI::parameterChanged(uint32_t index, float value)
 {
-    uiLog("[UI] parameterChanged index=%u value=%f", index, value);
+    uilog("[UI] parameterChanged index=%u value=%f", index, value);
 
     if (index != paramSamplePath)
         return;
 
     const uint32_t id = norm24ToId(value) & 0xFFFFFFu;
-    uiLog("[UI] paramSamplePath id=%u", id);
+    uilog("[UI] paramSamplePath id=%u", id);
 
     if (id == 0)
         return;
 
     std::string p;
     const bool ok = cacheReadNearby(id, p);
-    uiLog("[UI] cacheReadNearby ok=%d path='%s'", ok, p.c_str());
+    uilog("[UI] cacheReadNearby ok=%d path='%s'", ok, p.c_str());
 
     if (ok && !p.empty())
     {
