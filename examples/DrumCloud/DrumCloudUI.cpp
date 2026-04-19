@@ -1,10 +1,12 @@
 #define DRUMCLOUD_UI_DEBUG 0
 
 #include "DistrhoUI.hpp"
+#include "AudioFileLoader.hpp"
+#include "DrumCloudParams.hpp"
+
 
 #include <cstring>
 #include <cstdio>
-#include <cstdarg>
 
 #include <cstdint>
 #include <vector>
@@ -14,31 +16,7 @@
 #include <cmath>
 #include <GL/gl.h>
 
-#include "DrumCloudParams.hpp"
-
-// ------------------------------------------------------------
-// UI debug logger
-// ------------------------------------------------------------
-static void uilog(const char* fmt, ...)
-{
-#if !DRUMCLOUD_UI_DEBUG
-    (void)fmt;
-    return;
-#else
-    FILE* f = std::fopen("/tmp/drumcloud-ui.log", "a");
-    if (!f) return;
-
-    va_list args;
-    va_start(args, fmt);
-    std::vfprintf(f, fmt, args);
-    va_end(args);
-
-    std::fprintf(f, "\n");
-    std::fclose(f);
-#endif
-}
-
-
+namespace DISTRHO {
 
 
 // ------------------------------------------------------------
@@ -46,12 +24,6 @@ static void uilog(const char* fmt, ...)
 
 static constexpr uint32_t kMax24 = 0xFFFFFFu;
 
-static float idToNorm24(uint32_t id)
-{
-    id &= kMax24;
-    // encode to the *center* of the bucket to avoid rounding drift
-    return (float(id) + 0.5f) / float(kMax24);
-}
 
 static uint32_t norm24ToId(float v)
 {
@@ -68,39 +40,6 @@ static uint32_t norm24ToId(float v)
 }
 
 
-
-static uint32_t sampleIdFromPath(const char* path)
-{
-    if (path == nullptr || path[0] == '\0')
-        return 0;
-
-    uint32_t h = 2166136261u; // FNV-1a
-    for (const unsigned char* p = (const unsigned char*)path; *p; ++p)
-    {
-        h ^= (uint32_t)(*p);
-        h *= 16777619u;
-    }
-
-    h &= 0x00FFFFFFu; // 24-bit
-    if (h == 0) h = 1;
-    return h;
-}
-
-
-static uint32_t fnv1a32(const char* s)
-{
-    uint32_t h = 2166136261u;
-    for (const unsigned char* p = (const unsigned char*)s; *p; ++p)
-    {
-        h ^= (uint32_t)(*p);
-        h *= 16777619u;
-    }
-    if (h == 0) h = 1;
-    return h;
-}
-
-
-
 static std::string getCachePath()
 {
     const char* home = std::getenv("HOME");
@@ -110,15 +49,6 @@ static std::string getCachePath()
     return std::string(home) + "/.config/drumcloud-sample-cache.txt";
 }
 
-static void cacheWrite(uint32_t id, const std::string& path)
-{
-    const std::string fn = getCachePath();
-    std::FILE* fp = std::fopen(fn.c_str(), "a");
-    if (!fp) return;
-
-    std::fprintf(fp, "%u\t%s\n", (unsigned)id, path.c_str());
-    std::fclose(fp);
-}
 static bool cacheRead(uint32_t id, std::string& outPath)
 {
     outPath.clear();
@@ -165,49 +95,137 @@ static bool cacheReadNearby(uint32_t id, std::string& outPath)
 }
 
 
-
-namespace DISTRHO {
-
-
 class DrumCloudUI : public UI
 {
 public:
     DrumCloudUI()
         : UI(360, 90)
     {
-        uilog("----- UI START -----");
     }
 
-    void parameterChanged(uint32_t index, float value) override;
-    void stateChanged(const char* key, const char* value) override;
-
-    
 
 protected:
+    void parameterChanged(uint32_t index, float value) override;
+    void stateChanged(const char* key, const char* value) override;
     void onDisplay() override;
     bool onMouse(const MouseEvent& ev) override;
     bool onMotion(const MotionEvent& ev) override;
+    
 
 
-    // ---- data ----
+private:
+    // ---- waveform preview (NUVÆRENDE) ----
     static constexpr int kWavePreviewSize = 1024;
     float fWaveMin[kWavePreviewSize]{};
     float fWaveMax[kWavePreviewSize]{};
     bool  fWaveValid = false;
+    float fScanPosUI = 0.0f;
+
+
     // ---- Release UI ----
     float fReleaseMsUi = 250.0f;
     bool  fDragRelease = false;
     float fDragStartX = 0.0f;
     float fDragStartMs = 250.0f;
+    bool fDragStartPos = false;
 
 
+    // ---- Start/Spread UI ----
+    float fStartPosUi = 0.0f;   // 0..1
+    float fSpreadUi   = 0.0f;   // 0..1
+
+    // ---- sample/persist ----
     float fSamplePing = 0.0f;
     std::string fSamplePath;
     bool fRestoringFromParam = false;
 
-    bool loadWavePreviewFromWav(const char* path);
+    bool loadWavePreviewFromAudioFile(const char* path);
+    bool loadWavePreviewFromWav(const char* path);   // compatibility wrapper
 
+
+    // ---- waveform preview loader ----
+    
 };
+bool DrumCloudUI::loadWavePreviewFromAudioFile(const char* path)
+{
+    // reset
+    std::fill_n(fWaveMin, kWavePreviewSize, 0.0f);
+    std::fill_n(fWaveMax, kWavePreviewSize, 0.0f);
+    fWaveValid = false;
+
+    if (path == nullptr || path[0] == '\0')
+        return false;
+
+    LoadedAudio a;
+    std::string err;
+    const bool ok = loadAudioFileToFloat(path, a, &err);
+
+    if (!ok || a.channels == 0 || a.frames == 0 || a.interleaved.empty())
+    {
+        return false;
+    }
+
+    const uint32_t ch = a.channels;
+    const uint64_t frames = a.frames;
+    const float* data = a.interleaved.data();
+
+    // downsample: map frames -> kWavePreviewSize buckets
+    const uint64_t step = std::max<uint64_t>(1u, frames / (uint64_t)kWavePreviewSize);
+
+    for (int i = 0; i < kWavePreviewSize; ++i)
+    {
+        const uint64_t start = (uint64_t)i * step;
+        const uint64_t end   = std::min<uint64_t>(start + step, frames);
+
+        float mn =  1.0f;
+        float mx = -1.0f;
+
+        for (uint64_t f = start; f < end; ++f)
+        {
+            // pick channel with max abs, keep sign (similar to earlier)
+            float v = 0.0f;
+
+            if (ch == 1)
+            {
+                v = data[f];
+            }
+            else
+            {
+                const uint64_t base = f * (uint64_t)ch;
+                float best = data[base];
+                float bestAbs = std::fabs(best);
+
+                for (uint32_t c = 1; c < ch; ++c)
+                {
+                    const float s = data[base + c];
+                    const float ab = std::fabs(s);
+                    if (ab > bestAbs)
+                    {
+                        bestAbs = ab;
+                        best = s;
+                    }
+                }
+                v = best;
+            }
+
+            mn = std::min(mn, v);
+            mx = std::max(mx, v);
+        }
+
+        // clamp
+        if (mn < -1.0f) mn = -1.0f;
+        if (mx >  1.0f) mx =  1.0f;
+
+        fWaveMin[i] = mn;
+        fWaveMax[i] = mx;
+    }
+
+    fWaveValid = true;
+    return true;
+}
+
+
+ // <-- vi erstatter denne senere
 
 void DrumCloudUI::onDisplay()
 {
@@ -220,57 +238,137 @@ void DrumCloudUI::onDisplay()
     glClearColor(0.06f, 0.06f, 0.07f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
+    static int sTop = 0;
+if ((sTop++ % 60) == 0)
+{
+    FILE* f = std::fopen("/tmp/drumcloud-ui-scan.log", "a");
+    if (f)
+    {
+        std::fprintf(f, "onDisplay() fWaveValid=%d\n", (int)fWaveValid);
+        std::fclose(f);
+    }
+}
+
+
     // ---- midline (always) ----
     glLineWidth(1.0f);
     glColor4f(0.25f, 0.25f, 0.28f, 1.0f);
     glBegin(GL_LINES);
-        glVertex2f(0.0f, H - mid);
-        glVertex2f(W,   H - mid);
+        glVertex2f(12.0f, H - mid);
+        glVertex2f(W - 12.0f, H - mid);
+
     glEnd();
+
+    
+
 
     // ---- if we have waveform, draw it ----
     if (fWaveValid)
 {
-    glLineWidth(1.0f);
-    glColor4f(0.85f, 0.9f, 1.0f, 1.0f);
-    glBegin(GL_LINES);
+    // --- layout ---
+    const float pad = 12.0f;
+    const float x0  = pad;
+    const float x1  = W - pad;
+    const float y0  = pad;
+    const float y1  = H - pad;
 
-    for (int i = 0; i < kWavePreviewSize; ++i)
+    // --- scan position ---
+    const float scanPos = std::clamp(fScanPosUI, 0.0f, 1.0f);
+    const float scanX   = x0 + scanPos * (x1 - x0);
+
+    // DEBUG til fil (hver 30. repaint)
+    static int sCount = 0;
+    if ((sCount++ % 30) == 0)
     {
-        const float x  = (float)i / (kWavePreviewSize - 1) * W;
-        const float y1 = mid - fWaveMin[i] * mid;
-        const float y2 = mid - fWaveMax[i] * mid;
-
-        const float gy1 = H - y1;
-        const float gy2 = H - y2;
-
-        glVertex2f(x, gy1);
-        glVertex2f(x, gy2);
+        FILE* f = std::fopen("/tmp/drumcloud-ui-scan.log", "a");
+        if (f)
+        {
+            std::fprintf(f, "scanPos=%f scanX=%f fWaveValid=%d\n",
+                         scanPos, scanX, (int)fWaveValid);
+            std::fclose(f);
+        }
     }
 
-    glEnd();
+    
+    // --- waveform ---
+glLineWidth(1.0f);
+glColor4f(0.85f, 0.9f, 1.0f, 1.0f);
+glBegin(GL_LINES);
+
+const float yTop = pad;
+const float yBot = H - pad;
+const float midY = 0.5f * (yTop + yBot);
+const float ampY = 0.5f * (yBot - yTop);
+
+for (int i = 0; i < kWavePreviewSize; ++i)
+{
+    const float t = (kWavePreviewSize > 1)
+        ? (float)i / (float)(kWavePreviewSize - 1)
+        : 0.0f;
+
+    const float x = x0 + t * (x1 - x0);
+
+    // fWaveMin/Max forventes at være i -1..+1
+    const float mn = std::clamp(fWaveMin[i], -1.0f, 1.0f);
+    const float mx = std::clamp(fWaveMax[i], -1.0f, 1.0f);
+
+    const float y1n = midY + mn * ampY;
+    const float y2n = midY + mx * ampY;
+
+    // Vi bruger samme "H - y" convention som resten af din UI
+    glVertex2f(x, H - y1n);
+    glVertex2f(x, H - y2n);
 }
+glEnd();
+
+
+    // --- scan playhead (thin) ---
+    glLineWidth(2.0f);
+    glColor4f(0.1f, 0.95f, 0.3f, 0.9f);
+    glBegin(GL_LINES);
+        glVertex2f(scanX, y0);
+        glVertex2f(scanX, y1);
+    glEnd();
+
+    // ---- overlays: Start Position + Spread + glow playhead ----
+    {
+        // Start position line
+        const float startX = x0 + fStartPosUi * (x1 - x0);
+
+        // Spread band around start
+        const float halfW = 0.5f * fSpreadUi * (x1 - x0);
+        const float sx0 = std::max(x0, startX - halfW);
+        const float sx1 = std::min(x1, startX + halfW);
+
+        // Spread fill (subtle)
+        if (fSpreadUi > 0.0001f)
+        {
+            glColor4f(0.25f, 0.25f, 0.35f, 0.25f);
+            glBegin(GL_QUADS);
+                glVertex2f(sx0, y1);
+                glVertex2f(sx1, y1);
+                glVertex2f(sx1, y0);
+                glVertex2f(sx0, y0);
+            glEnd();
+        }
+
+        // Glow playhead (fat, transparent)
+        glLineWidth(6.0f);
+        glColor4f(0.1f, 0.95f, 0.3f, 0.15f);
+        glBegin(GL_LINES);
+            glVertex2f(scanX, y0);
+            glVertex2f(scanX, y1);
+        glEnd();
+        glLineWidth(1.0f);
+    } // overlays-scope
+} // if (fWaveValid)
 else
 {
-    // ---- placeholder (no waveform yet) ----
-    glColor4f(0.15f, 0.15f, 0.18f, 1.0f);
-    glBegin(GL_QUADS);
-        glVertex2f(12.0f, H - 12.0f);
-        glVertex2f(W - 12.0f, H - 12.0f);
-        glVertex2f(W - 12.0f, 12.0f);
-        glVertex2f(12.0f, 12.0f);
-    glEnd();
-
-    glColor4f(0.7f, 0.7f, 0.8f, 1.0f);
-    glBegin(GL_LINES);
-        glVertex2f(W*0.5f - 18.0f, H*0.5f);
-        glVertex2f(W*0.5f + 18.0f, H*0.5f);
-        glVertex2f(W*0.5f, H*0.5f - 18.0f);
-        glVertex2f(W*0.5f, H*0.5f + 18.0f);
-    glEnd();
+    // placeholder...
 }
 
 
+    
 
 
     // ---- Release slider (simple bar) ----
@@ -322,19 +420,45 @@ else
 }
 
 
-
-
     bool DrumCloudUI::onMotion(const MotionEvent& ev)
 {
+    const float mx = (float)ev.pos.getX();
+
+    // ---- Start Position drag ----
+    if (fDragStartPos)
+    {
+        const float pad = 12.0f;
+        const float wx0 = pad;
+        const float wx1 = (float)getWidth() - pad;
+
+        float norm = 0.0f;
+        if (wx1 > wx0)
+            norm = (mx - wx0) / (wx1 - wx0);
+
+        norm = std::clamp(norm, 0.0f, 1.0f);
+
+        // ✅ dead zone near zero
+        if (norm < 0.005f)
+            norm = 0.0f;
+
+        fStartPosUi = norm;
+
+        editParameter(paramStartPosition, true);
+        setParameterValue(paramStartPosition, norm);
+        editParameter(paramStartPosition, false);
+
+        repaint();
+        return true;
+    }
+
+    // ---- Release drag (din eksisterende) ----
     if (!fDragRelease)
         return false;
 
     const float minMs = 5.0f;
     const float maxMs = 5000.0f;
-
     const float w = 160.0f;
 
-    const float mx = (float)ev.pos.getX();
     const float dx = mx - fDragStartX;
 
     float t0 = 0.0f;
@@ -356,39 +480,55 @@ else
     return true;
 }
 
+
     bool DrumCloudUI::onMouse(const MouseEvent& ev)
 {
-    // samme rect som i onDisplay
-    const float x = 10.0f;
-    const float y = 72.0f;
-    const float w = 160.0f;
-    const float h = 12.0f;
+    // Release slider rect
+    const float rx = 10.0f;
+    const float ry = 72.0f;
+    const float rw = 160.0f;
+    const float rh = 12.0f;
 
     const float mx = (float)ev.pos.getX();
     const float my = (float)ev.pos.getY();
 
-    const float H = (float)getHeight();
-    const float ry0 = H - y;
-    const float ry1 = H - (y + h);
+    const float H  = (float)getHeight();
+    const float rry0 = H - ry;
+    const float rry1 = H - (ry + rh);
 
     const bool hitRelease =
-        (mx >= x && mx <= x + w) &&
-        (my >= ry1 && my <= ry0);
+        (mx >= rx && mx <= rx + rw) &&
+        (my >= rry1 && my <= rry0);
 
-    // Left click press
+    // Waveform rect
+    const float pad = 12.0f;
+    const float wx0 = pad;
+    const float wx1 = (float)getWidth() - pad;
+    const float wy0 = pad;
+    const float wy1 = H - pad;
+
+    const bool hitWave =
+        (mx >= wx0 && mx <= wx1) &&
+        (my >= wy0 && my <= wy1);
+
+    // Start Position overlay zone: nederste del af waveform-området
+    const float startZoneH = 16.0f; // px (justér gerne)
+    const bool hitStartPosZone =
+        hitWave && (my >= (wy1 - startZoneH) && my <= wy1);
+
     if (ev.button == 1 && ev.press)
     {
+        // 1) Release drag
         if (hitRelease)
         {
             fDragRelease = true;
             fDragStartX  = mx;
             fDragStartMs = fReleaseMsUi;
 
-            // klik sætter direkte værdi
             const float minMs = 5.0f;
             const float maxMs = 5000.0f;
 
-            float t = (mx - x) / w;
+            float t = (mx - rx) / rw;
             if (t < 0.0f) t = 0.0f;
             if (t > 1.0f) t = 1.0f;
 
@@ -403,12 +543,41 @@ else
             return true;
         }
 
-        // ellers: sample file dialog
-        requestStateFile("samplePath");
-        return true;
+        // 2) Start Position drag (SKAL ligge før hitWave->load!)
+        if (hitStartPosZone)
+        {
+            fDragStartPos = true;
+
+            float norm = 0.0f;
+            if (wx1 > wx0)
+                norm = (mx - wx0) / (wx1 - wx0);
+
+            norm = std::clamp(norm, 0.0f, 1.0f);
+
+            // dead zone near zero
+            if (norm < 0.005f)
+                norm = 0.0f;
+
+            fStartPosUi = norm;
+
+            editParameter(paramStartPosition, true);
+            setParameterValue(paramStartPosition, norm);
+            editParameter(paramStartPosition, false);
+
+            repaint();
+            return true;
+        }
+
+        // 3) Click in waveform area => load sample
+        if (hitWave)
+        {
+            requestStateFile("samplePath");
+            return true;
+        }
+
+        return false;
     }
 
-    // Mouse release: stop drag (DPF sender typisk ev.press=false for release)
     if (ev.button == 1 && !ev.press)
     {
         if (fDragRelease)
@@ -416,194 +585,123 @@ else
             fDragRelease = false;
             return true;
         }
+
+        if (fDragStartPos)
+        {
+            fDragStartPos = false;
+            return true;
+        }
     }
 
     return false;
 }
 
-    
 
+    
 
 
 void DrumCloudUI::stateChanged(const char* key, const char* value)
 {
-    uilog("[UI] stateChanged key='%s' value='%s'",
-          key, value ? value : "(null)");
+    if (std::strcmp(key, "samplePath") == 0)
+    {
+        const std::string newPath = value ? value : "";
 
-    if (std::strcmp(key, "samplePath") != 0)
+        // undgå spam/loop hvis samme path kommer igen
+        if (newPath == fSamplePath)
+            return;
+
+        fSamplePath = newPath;
+
+        // UI preview (AudioFileLoader - alle formater du understøtter)
+        fWaveValid = false;
+        if (!fSamplePath.empty())
+        {
+            fWaveValid = loadWavePreviewFromAudioFile(fSamplePath.c_str());
+        }
+
+        // Ping host så projektet gemmer state (hidden param trick)
+        // ❗ MEN: ikke under restore
+        if (!fRestoringFromParam)
+        {
+            fSamplePing = (fSamplePing < 0.5f) ? 1.0f : 0.0f;
+            editParameter(paramSamplePath, true);
+            setParameterValue(paramSamplePath, fSamplePing);
+            editParameter(paramSamplePath, false);
+        }
+
+        repaint();
         return;
+    }
 
-    // Cancel / tom sti
-    if (value == nullptr || value[0] == '\0')
-        return;
-
-    // UI skal vide at der er sample (til + tegnet)
-    fSamplePath = value;
-    uilog("[UI] samplePath selected='%s'", value);
-
-
-    // cache til id->path restore
-    uint32_t id = sampleIdFromPath(value);
-    id &= 0xFFFFFFu;
-
-    uilog("[UI] cacheWrite id=%u path='%s'", id, value);
-    cacheWrite(id, value);
-
-
-    editParameter(paramSamplePath, true);
-    setParameterValue(paramSamplePath, idToNorm24(id));
-    editParameter(paramSamplePath, false);
-
-
-
-    // UI preview
-    loadWavePreviewFromWav(value);
-    repaint();
+    UI::stateChanged(key, value);
 }
-
-
-
-
 
 
 void DrumCloudUI::parameterChanged(uint32_t index, float value)
 {
-    uilog("[UI] parameterChanged index=%u value=%f", index, value);
-
-    if (index != paramSamplePath)
-        return;
-
-    const uint32_t id = norm24ToId(value) & 0xFFFFFFu;
-    uilog("[UI] paramSamplePath id=%u", id);
-
-    if (id == 0)
-        return;
-
-    std::string p;
-    const bool ok = cacheReadNearby(id, p);
-    uilog("[UI] cacheReadNearby ok=%d path='%s'", ok, p.c_str());
-
-    if (ok && !p.empty())
+    if (index == paramSamplePath)
     {
-        loadWavePreviewFromWav(p.c_str());
-        repaint();
-    }
-    setState("samplePath", p.c_str());   // ✅ fortæl DSP/host igen ved restore
+        const uint32_t id = norm24ToId(value) & 0xFFFFFFu;
+        if (id == 0)
+            return;
 
+        std::string p;
+        const bool ok = cacheReadNearby(id, p);
+
+        if (ok && !p.empty())
+        {
+            fRestoringFromParam = true;
+
+            fWaveValid = loadWavePreviewFromAudioFile(p.c_str());
+            repaint();
+
+            setState("samplePath", p.c_str()); // push to DSP/state
+
+            fRestoringFromParam = false;
+        }
+        return;
+    }
+
+    // --- Release ---
     if (index == paramReleaseMs)
     {
-    fReleaseMsUi = value;  // value er i ms (5..5000), fordi param-range er ms
-    repaint();
-    return;
+        fReleaseMsUi = value;  // ms (eller norm, alt efter din UI mapping)
+        repaint();
+        return;
     }
 
+    // --- Start Position ---
+    if (index == paramStartPosition)
+    {
+        fStartPosUi = value;   // 0..1
+        repaint();
+        return;
+    }
 
+    // --- Position Spread ---
+    if (index == paramPositionSpread)
+    {
+        fSpreadUi = value;     // 0..1
+        repaint();
+        return;
+    }
+    if (index == paramScanPos)
+    {
+    fScanPosUI = value;     // 0..1
+    repaint();              // sørg for redraw
+    return;
+    }
+    
+
+
+    // (evt. andre parametre...)
 }
-
-
-
-
-
-
-
-
-static uint32_t readLE32(const uint8_t* p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-static uint16_t readLE16(const uint8_t* p) {
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-
-
 
 
 bool DrumCloudUI::loadWavePreviewFromWav(const char* path)
 {
-    std::fill_n(fWaveMin, kWavePreviewSize, 0.0f);
-    std::fill_n(fWaveMax, kWavePreviewSize, 0.0f);
-    fWaveValid = false;
-
-    FILE* fp = std::fopen(path, "rb");
-    if (!fp) return false;
-
-    uint8_t hdr[12];
-    if (std::fread(hdr, 1, 12, fp) != 12) { std::fclose(fp); return false; }
-    if (std::memcmp(hdr, "RIFF", 4) != 0 || std::memcmp(hdr + 8, "WAVE", 4) != 0) {
-        std::fclose(fp); return false;
-    }
-
-    uint16_t audioFormat = 0, numCh = 0, bits = 0;
-    uint32_t dataSize = 0;
-    long dataPos = 0;
-
-    while (true) {
-        uint8_t ch[8];
-        if (std::fread(ch, 1, 8, fp) != 8) break;
-        const uint32_t chunkSize = readLE32(ch + 4);
-
-        if (std::memcmp(ch, "fmt ", 4) == 0) {
-            std::vector<uint8_t> fmt(chunkSize);
-            if (chunkSize > 0 && std::fread(fmt.data(), 1, chunkSize, fp) != chunkSize) { std::fclose(fp); return false; }
-
-            audioFormat = readLE16(fmt.data() + 0);
-            numCh       = readLE16(fmt.data() + 2);
-            bits        = readLE16(fmt.data() + 14);
-
-        } else if (std::memcmp(ch, "data", 4) == 0) {
-            dataPos = std::ftell(fp);
-            dataSize = chunkSize;
-            std::fseek(fp, chunkSize, SEEK_CUR);
-
-        } else {
-            std::fseek(fp, chunkSize, SEEK_CUR);
-        }
-
-        if (chunkSize & 1) std::fseek(fp, 1, SEEK_CUR);
-    }
-
-    if (audioFormat != 1 || (numCh != 1 && numCh != 2) || bits != 16 || dataPos <= 0 || dataSize == 0) {
-        std::fclose(fp); return false;
-    }
-
-    const uint32_t bytesPerFrame = (uint32_t)numCh * 2u;
-    const uint32_t frameCount = dataSize / bytesPerFrame;
-    if (frameCount == 0) { std::fclose(fp); return false; }
-
-    const uint32_t step = std::max(1u, frameCount / (uint32_t)kWavePreviewSize);
-
-    for (int i = 0; i < kWavePreviewSize; ++i) {
-        const uint32_t start = (uint32_t)i * step;
-        const uint32_t end   = std::min(start + step, frameCount);
-
-        float mn =  1.0f;
-        float mx = -1.0f;
-
-        std::fseek(fp, dataPos + (long)(start * bytesPerFrame), SEEK_SET);
-
-        for (uint32_t f = start; f < end; ++f) {
-            int16_t sL = 0, sR = 0;
-            if (numCh == 1) {
-                if (std::fread(&sL, 2, 1, fp) != 1) break;
-            } else {
-                if (std::fread(&sL, 2, 1, fp) != 1) break;
-                if (std::fread(&sR, 2, 1, fp) != 1) break;
-                sL = (int16_t)(((int)sL + (int)sR) / 2);
-            }
-
-            const float v = (float)sL / 32768.0f;
-            mn = std::min(mn, v);
-            mx = std::max(mx, v);
-        }
-
-        fWaveMin[i] = mn;
-        fWaveMax[i] = mx;
-    }
-
-    std::fclose(fp);
-    fWaveValid = true;
-    return true;
+    return loadWavePreviewFromAudioFile(path);
 }
-
 
 
 UI* createUI()
@@ -612,7 +710,3 @@ UI* createUI()
 }
 
 } // namespace DISTRHO
-
-
-
-

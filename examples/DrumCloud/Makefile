@@ -4,13 +4,13 @@
 NAME = d_drumcloud
 
 FILES_DSP = \
-        SendNoteExamplePlugin.cpp
+        SendNoteExamplePlugin.cpp \
+        AudioFileLoader.cpp
 
-#  BASE_FLAGS += -DDGL_USE_WEB_VIEW=0
-
-
-# UI stub (required for CLAP)
-FILES_UI = DrumCloudUI.cpp 
+FILES_UI = \
+        DrumCloudUI.cpp \
+        AudioFileLoader.cpp
+ 
 
 # Build only CLAP for now
 TARGETS = clap
