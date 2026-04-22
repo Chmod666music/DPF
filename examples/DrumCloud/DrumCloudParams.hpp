@@ -1,19 +1,23 @@
 #pragma once
-#include <cstdint>
 
-enum Parameters : uint32_t
+enum DrumCloudParams
 {
     paramVolume = 0,
-    paramReleaseMs,
-    paramVelocityAmount,
-    paramVelocityGrainSize,
+    paramDensity,
+    paramVelocityToDensity,
+    paramVelocityToGrainSize,
+    paramPitchRate,
+    paramRelease,
     paramStartPosition,
     paramPositionSpread,
     paramSnapMs,
+    paramScanSpeed,
+    paramScanMode,
+    paramScanJumpRate,
+    paramScanJumpAmount,
+    paramScanJumpSmoothMs,
+    paramSyncRate,
     paramSamplePath,
-    paramScanPos,   // 👈 NY
+    paramScanPos,
     paramCount
 };
-
-
-

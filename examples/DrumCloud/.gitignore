@@ -1,0 +1,12 @@
+.vscode/
+backup ting/
+compile_commands.json
+DrumCloudParams_matched_trio.hpp
+DrumCloudUI_matched_trio.cpp
+SendNoteExamplePlugin_matched_trio.cpp
+mod_gothic.zip
+meters.lv2/
+
+FuimadrumHeaderRGBA.inc
+FuimadrumLogoResource.inc
+fuimadrum_logo_compact.png

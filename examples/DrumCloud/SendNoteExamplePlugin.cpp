@@ -21,6 +21,7 @@
 
 
 #include <cmath>
+#include <cstdarg>
 #include <cstring>
 #include <algorithm>
 #include <cstdint>
@@ -29,6 +30,7 @@
 #include <string>
 #include <fstream>
 #include <cstdlib>   // getenv
+#include <atomic>
 #include "DrumCloudParams.hpp"
 
 
@@ -36,6 +38,22 @@
 // Sample path cache helpers (Bitwig-safe persistence)
 
 START_NAMESPACE_DISTRHO
+
+std::atomic<float> gDrumCloudUiScanPos{0.0f};
+std::atomic<int>   gDrumCloudUiScanMode{0};
+
+static void dirtyDbgLog(const char* fmt, ...)
+{
+    FILE* fp = std::fopen("/tmp/drumcloud-dirty.log", "a");
+    if (!fp) return;
+    std::va_list args;
+    va_start(args, fmt);
+    std::vfprintf(fp, fmt, args);
+    va_end(args);
+    std::fputc('\n', fp);
+    std::fclose(fp);
+}
+
 
 
 
@@ -351,8 +369,9 @@ public:
 
     
 
-        fDensityNorm = 0.25f;
+        fDensityNorm = fBaseDensityNorm;
         updateDensityFromNorm();
+        updateScanSlewCoeff();
 
 
     reset(); // ✅ semikolon
@@ -445,6 +464,136 @@ float getReleaseMs() const noexcept
     return fReleaseMs;
 }
 
+
+float getBaseDensityNorm() const noexcept
+{
+    return fBaseDensityNorm;
+}
+
+void setBaseDensityNorm(float v) noexcept
+{
+    fBaseDensityNorm = std::clamp(v, 0.0f, 1.0f);
+    fDensityNorm = fBaseDensityNorm;
+    updateDensityFromNorm();
+}
+
+float getVelToDensity() const noexcept
+{
+    return fVelToDensity;
+}
+
+void setVelToDensity(float amt) noexcept
+{
+    fVelToDensity = std::clamp(amt, 0.0f, 1.0f);
+}
+
+float getPitchRateParam() const noexcept
+{
+    return fPitchRateParam;
+}
+
+void setPitchRateParam(float v) noexcept
+{
+    fPitchRateParam = std::clamp(v, 0.5f, 2.0f);
+}
+
+float getScanSpeed() const noexcept
+{
+    return fScanSpeed;
+}
+
+void setScanSpeed(float v) noexcept
+{
+    fScanSpeed = std::clamp(v, 0.0f, 2.0f);
+}
+
+float getScanMode() const noexcept
+{
+    return float(fScanMode);
+}
+
+void setScanMode(float v)
+{
+    const int mode = int(std::lround(v));
+    fScanMode = std::clamp(mode, 0, 3);
+    fScanHoldSamples = 0.0f;
+    fScanTargetPos = fScanPos;
+}
+
+float getScanJumpRateHz() const noexcept
+{
+    return fScanJumpRateHz;
+}
+
+void setScanJumpRateHz(float hz)
+{
+    fScanJumpRateHz = std::clamp(hz, 0.1f, 40.0f);
+}
+
+float getScanJumpAmount() const noexcept
+{
+    return fScanJumpAmount;
+}
+
+void setScanJumpAmount(float v)
+{
+    fScanJumpAmount = std::clamp(v, 0.0f, 1.0f);
+}
+
+float getScanJumpSmoothMs() const noexcept
+{
+    return fScanSlewMs;
+}
+
+void setScanJumpSmoothMs(float ms)
+{
+    fScanSlewMs = std::clamp(ms, 0.0f, 500.0f);
+    updateScanSlewCoeff();
+}
+
+float getTempoSyncRateMultiplier() const noexcept
+{
+    switch (fTempoSyncRateChoice)
+    {
+    case 0: return 0.5f;
+    case 2: return 2.0f;
+    default: return 1.0f;
+    }
+}
+
+void setTempoSyncRateChoice(float value) noexcept
+{
+    if (value < 0.25f)
+        fTempoSyncRateChoice = 0;
+    else if (value < 0.75f)
+        fTempoSyncRateChoice = 1;
+    else
+        fTempoSyncRateChoice = 2;
+}
+
+float getTempoSyncRateChoice() const noexcept
+{
+    switch (fTempoSyncRateChoice)
+    {
+    case 0: return 0.0f;
+    case 2: return 1.0f;
+    default: return 0.5f;
+    }
+}
+
+void setTempoSyncInfo(float bpm, bool playing) noexcept
+{
+    fTempoSyncBpm = std::clamp(bpm, 20.0f, 300.0f);
+    fTempoSyncPlaying = playing;
+}
+
+void setTempoSyncPhase(float phase) noexcept
+{
+    phase = phase - std::floor(phase);
+    if (phase < 0.0f) phase += 1.0f;
+    fTempoSyncPhase = phase;
+}
+
     // ---- start / spread / snap control ----
     void setStartPosNorm(float v)
     {
@@ -504,18 +653,23 @@ void trigger(int note, int vel)
 
     // NOTE → PITCH
     const float noteNorm = (float(note) - 60.0f) / 12.0f;
-    fPitchRate = std::pow(2.0f, noteNorm);
+    const float pitchFollow = 0.25f;
+    fPitchRate = fPitchRateParam * std::pow(2.0f, noteNorm * pitchFollow);
 
-    // velocity -> density
+    // velocity -> density (blend with base density knob)
     const float velNorm   = float(vel) / 127.0f;
     const float velShaped = velNorm * velNorm;
-    fDensityNorm = velShaped;
+    fDensityNorm = std::clamp(
+        fBaseDensityNorm * (1.0f - fVelToDensity) + velShaped * fVelToDensity,
+        0.0f, 1.0f
+    );
     updateDensityFromNorm();
 
     // burst ved NOTE-ON
-    const float burstWindowSec = 0.060f;
+    const float burstWindowSec = 0.030f;
     int burst = int(std::round(fGrainsPerSec * burstWindowSec));
-    if (burst < 1) burst = 1;
+    if (burst < 2) burst = 2;
+    if (burst > 3) burst = 3;
 
     for (int i = 0; i < burst; ++i)
         spawnOneGrain(note, vel, 1.0f);
@@ -566,8 +720,64 @@ void process(float* outL, float* outR, uint32_t frames)
 
     if (fScanEnabled && sampleLen > 0 && sr > 1.0f)
     {
-    fScanPos += (fScanSpeed * float(frames)) / sr;
-    fScanPos -= std::floor(fScanPos);
+        if (fScanMode == kScanHold)
+        {
+            fScanPos = std::clamp(fStartPosNorm, 0.0f, 1.0f);
+            fScanTargetPos = fScanPos;
+            fScanWanderVel = 0.0f;
+            fScanHoldSamples = 0.0f;
+        }
+        else if (fScanMode == kScanForward)
+        {
+            fScanPos += (fScanSpeed * float(frames)) / sr;
+            fScanPos -= std::floor(fScanPos);
+            fScanTargetPos = fScanPos;
+        }
+        else if (fScanMode == kScanRandomJump)
+        {
+            const float speedScale = std::max(0.05f, fScanSpeed);
+            const float effectiveJumpRateHz = std::max(0.10f, fScanJumpRateHz * speedScale);
+
+            fScanHoldSamples -= float(frames);
+
+            while (fScanHoldSamples <= 0.0f)
+            {
+                const float center = fStartPosNorm;
+                const float halfRange = 0.5f * fScanJumpAmount;
+
+                float p = center + (rand01(rng) * 2.0f - 1.0f) * halfRange;
+                p = std::clamp(p, 0.0f, 1.0f);
+
+                fScanTargetPos = p;
+                fScanHoldSamples += sr / effectiveJumpRateHz;
+            }
+        }
+        else if (fScanMode == kScanTempoSync)
+        {
+            if (fTempoSyncPlaying)
+            {
+                const float beatsPerSec = (fTempoSyncBpm / 60.0f) * getTempoSyncRateMultiplier();
+                fTempoSyncPhase += (beatsPerSec * float(frames)) / sr;
+                fTempoSyncPhase -= std::floor(fTempoSyncPhase);
+                fScanPos = std::clamp(fTempoSyncPhase, 0.0f, 1.0f);
+                fScanTargetPos = fScanPos;
+            }
+        }
+
+        if (fScanMode != kScanTempoSync && fScanMode != kScanHold)
+        {
+            float delta = fScanTargetPos - fScanPos;
+            if (delta > 0.5f)
+                delta -= 1.0f;
+            else if (delta < -0.5f)
+                delta += 1.0f;
+
+            const float slew = std::clamp(fScanSlewCoeff * float(frames), 0.0f, 1.0f);
+            fScanPos += delta * slew;
+
+            while (fScanPos < 0.0f) fScanPos += 1.0f;
+            while (fScanPos >= 1.0f) fScanPos -= 1.0f;
+        }
     }
 
     // ---- push scan pos to UI (meter) ----
@@ -591,6 +801,7 @@ void process(float* outL, float* outR, uint32_t frames)
     const float total = (fReleaseMs * 0.001f) * sr;
     tailMul = (total > 1.0f) ? (float(fReleaseLeft) / total) : 0.0f;
     tailMul = std::clamp(tailMul, 0.0f, 1.0f);
+    tailMul = std::sqrt(tailMul); // keep more energy in the tail
 
 }
     
@@ -704,9 +915,16 @@ else
     g.pos += g.step;
     if (g.pos < 0.0f || g.pos >= float(sampleLen - 1))
     {
-        g.active = false;
-        swapRemove(i);
-        continue;
+        if (!g.releasing)
+        {
+            g.releasing = true;
+            g.rel = std::min(g.rel, 0.35f);
+            const float quickRelMs = 2.0f;
+            const float quickRelSamples = std::max(1.0f, sr * (quickRelMs / 1000.0f));
+            g.relDec = std::max(g.relDec, 1.0f / quickRelSamples);
+        }
+
+        g.pos = std::clamp(g.pos, 0.0f, float(sampleLen - 1));
     }
 }
 else
@@ -720,8 +938,8 @@ else
             ++i;
         }
 
-        outL[f] += l;
-        outR[f] += r;
+        outL[f] += std::tanh(l * 0.9f);
+        outR[f] += std::tanh(r * 0.9f);
     }
 }
 
@@ -746,14 +964,26 @@ private:
 
 void updateDensityFromNorm()
 {
-    const float minD = 2.0f;
-    const float maxD = 80.0f;
+    // Shaped density curve:
+    // low end stays gentle for pads/ambient,
+    // high end ramps up more dramatically for cloud mode.
+    const float minD = 0.2f;
+    const float maxD = 10.0f;
 
-    const float n = (fDensityNorm < 0.0f) ? 0.0f : (fDensityNorm > 1.0f ? 1.0f : fDensityNorm);
-    fGrainsPerSec = minD + (maxD - minD) * n;
+    const float n = std::clamp(fDensityNorm, 0.0f, 1.0f);
+    const float shaped = std::pow(n, 1.8f);
+
+    fGrainsPerSec = minD + (maxD - minD) * shaped;
 
     if (fGrainsPerSec < 0.001f)
         fGrainsPerSec = 0.001f;
+}
+
+void updateScanSlewCoeff()
+{
+    const float ms = std::max(1.0f, fScanSlewMs);
+    const float samples = (ms * 0.001f) * sr;
+    fScanSlewCoeff = (samples > 1.0f) ? (1.0f / samples) : 1.0f;
 }
 
 // ---- Random helpers (samme "kontrol-lag") ----
@@ -812,15 +1042,66 @@ void swapRemove(int idx)
         oR = aR + (bR - aR) * frac;
     }
 
+
+
+    int32_t seekZeroCrossNear(int32_t start, int32_t radius) const
+    {
+        if (sampleLen <= 2) return std::clamp(start, 0, std::max(0, sampleLen - 2));
+
+        start = std::clamp(start, 0, sampleLen - 2);
+        radius = std::max(0, radius);
+
+        auto monoAt = [&](int32_t i) -> float
+        {
+            return 0.5f * (sampleL[i] + sampleR[i]);
+        };
+
+        const int32_t lo = std::max<int32_t>(0, start - radius);
+        const int32_t hi = std::min<int32_t>(sampleLen - 2, start + radius);
+
+        int32_t best = start;
+        float bestScore = std::fabs(monoAt(start));
+
+        for (int32_t i = lo; i <= hi; ++i)
+        {
+            const float a = monoAt(i);
+            const float b = monoAt(i + 1);
+            const float score = std::fabs(a) + std::fabs(b);
+
+            if ((a <= 0.0f && b >= 0.0f) || (a >= 0.0f && b <= 0.0f))
+                return i;
+
+            if (score < bestScore)
+            {
+                bestScore = score;
+                best = i;
+            }
+        }
+
+        return best;
+    }
+
     float windowAt(int32_t age, int32_t dur) const
     {
         if (dur <= 1) return 0.0f;
+
         const float ph = float(age) / float(dur - 1);
-        const float x  = ph * float(kWinSize - 1);
-        const int i0 = int(x);
-        const int i1 = std::min(i0 + 1, kWinSize - 1);
-        const float frac = x - float(i0);
-        return win[i0] + (win[i1] - win[i0]) * frac;
+
+        const float attackEnd = 0.025f;
+        const float holdEnd   = 0.160f;
+
+        if (ph <= attackEnd)
+        {
+            const float t = ph / attackEnd;
+            return 0.25f + 0.75f * t;
+        }
+
+        if (ph <= holdEnd)
+            return 1.0f;
+
+        const float t = (ph - holdEnd) / (1.0f - holdEnd);
+        const float c = std::cos(t * float(M_PI) * 0.5f);
+        return c * c;
     }
 
     int32_t snapBackward(int32_t raw, int32_t radius) const
@@ -1183,13 +1464,13 @@ void spawnOneGrain(int note, int vel, float densityMul)
     // -------------------------------
     // 1) Compute duration FIRST
     // -------------------------------
-    const float grainMsBase = 10.0f + frand01(rng) * 35.0f;
+    const float grainMsBase = 18.0f + frand01(rng) * 48.0f;
 
     const float velNorm  = float(vel) / 127.0f;
     const float velCurve = velNorm * velNorm;
 
-    const float minMs = 12.0f;
-    const float maxMs = 220.0f;
+    const float minMs = 22.0f;
+    const float maxMs = 280.0f;
 
     const float grainMsTarget = minMs + (maxMs - minMs) * velCurve;
 
@@ -1239,6 +1520,10 @@ if (sampleLen > 0)
 }
 
 
+    // tiny local zero-cross seek to reduce clicks/pops on grain start
+    const int32_t zcRadius = std::max<int32_t>(1, int32_t(sr * 0.00075f)); // ~0.75 ms
+    pos = float(seekZeroCrossNear(int32_t(pos), zcRadius));
+
     g.pos = pos;
 }
 else
@@ -1249,7 +1534,11 @@ else
 
 
 
-    g.amp = 0.08f + 0.35f * d;
+    g.amp = 0.10f + 0.42f * d;
+    if (densityMul >= 0.95f)
+        g.amp *= 1.18f;
+
+    g.step = fPitchRate;
 
     const float semis  = (frand01(rng) - 0.5f) * 1.0f;
     const float detune = std::pow(2.0f, semis / 12.0f);
@@ -1274,8 +1563,17 @@ private:
     static constexpr int kMaxGrains = 64;
     static constexpr int kWinSize   = 1024;
 
+    enum ScanMode
+    {
+        kScanHold = 0,
+        kScanForward = 1,
+        kScanRandomJump = 2,
+        kScanTempoSync = 3
+    };
+
     float sr = 48000.0f;
     float fPitchRate = 1.0f;
+    float fPitchRateParam = 0.71f;
     bool noteIsHeld[128]{};
     uint8_t lastNoteOn  = 60;
     uint8_t lastNoteOff = 0;
@@ -1286,10 +1584,12 @@ private:
     int32_t loopLen = 0;
     uint32_t rng = 0x12345678u;
 
-    float fDensityNorm  = 0.25f;
+    float fBaseDensityNorm = 0.72f;
+    float fVelToDensity = 0.42f;
+    float fDensityNorm  = 0.72f;
     float fGrainsPerSec = 10.0f;
 
-    float fVelToGrainSize = 0.5f;
+    float fVelToGrainSize = 0.58f;
 
      // ---- position random / snap ----
     float fStartPosNorm  = 0.0f;   // 0..1
@@ -1297,9 +1597,21 @@ private:
     float fSnapMs        = 10.0f;  // ms
 
     
-    float fScanPos   = 0.0f;   // 0..1   ✅ MANGLED
-    float fScanSpeed = 0.10f;  // cycles per second
+    float fScanPos   = 0.0f;   // 0..1
+    float fScanSpeed = 0.5f;  // cycles per second / movement scale
     bool  fScanEnabled = true;
+    int   fScanMode = kScanHold;
+    float fScanJumpRateHz = 27.0f;
+    float fScanJumpAmount = 0.69f;
+    float fScanHoldSamples = 0.0f;
+    float fScanTargetPos = 0.0f;
+    float fScanWanderVel = 0.0f;
+    float fTempoSyncBpm = 120.0f;
+    bool  fTempoSyncPlaying = false;
+    float fTempoSyncPhase = 0.0f;
+    int   fTempoSyncRateChoice = 1; // 0=0.5x, 1=1x, 2=2x
+    float fScanSlewMs = 272.0f;
+    float fScanSlewCoeff = 1.0f;
 
 
 
@@ -1477,17 +1789,20 @@ float getParameterValue(uint32_t index) const override
     if (index == paramVolume)
         return fVolume;
 
-    if (index == paramReleaseMs)
-        return fGran.getReleaseMs();
+    if (index == paramDensity)
+        return fGran.getBaseDensityNorm();
 
-    if (index == paramVelocityAmount)
-        return fVelocityAmount;
+    if (index == paramVelocityToDensity)
+        return fGran.getVelToDensity();
 
-    if (index == paramVelocityGrainSize)
+    if (index == paramVelocityToGrainSize)
         return fVelocityGrainSize;
 
-    if (index == paramSamplePath)
-        return 0.0f;
+    if (index == paramPitchRate)
+        return fGran.getPitchRateParam();
+
+    if (index == paramRelease)
+        return fGran.getReleaseMs();
 
     if (index == paramStartPosition)
         return fGran.getStartPosNorm();
@@ -1498,10 +1813,32 @@ float getParameterValue(uint32_t index) const override
     if (index == paramSnapMs)
         return fGran.getSnapMs();
 
+    if (index == paramScanSpeed)
+        return fGran.getScanSpeed();
+
+    if (index == paramScanMode)
+        return fGran.getScanMode();
+
+    if (index == paramScanJumpRate)
+        return fGran.getScanJumpRateHz();
+
+    if (index == paramScanJumpAmount)
+        return fGran.getScanJumpAmount();
+
+    if (index == paramScanJumpSmoothMs)
+        return fGran.getScanJumpSmoothMs();
+
+    if (index == paramSyncRate)
+        return fGran.getTempoSyncRateChoice();
+
+    if (index == paramSamplePath)
+    {
+        dirtyDbgLog("getParameterValue paramSamplePath -> %.9f", fSamplePing);
+        return fSamplePing;
+    }
+
     if (index == paramScanPos)
-        return fGran.getScanPosNorm();
-
-
+        return 0.0f;
 
     return 0.0f;
 }
@@ -1518,37 +1855,69 @@ void setParameterValue(uint32_t index, float value) override
         fVolume = value;
         break;
 
-    case paramReleaseMs:
-        fGran.setReleaseMs(value);
+    case paramDensity:
+        fGran.setBaseDensityNorm(value);
         break;
 
-
-    case paramVelocityAmount:
+    case paramVelocityToDensity:
         fVelocityAmount = value;
+        fGran.setVelToDensity(value);
         break;
 
-    case paramVelocityGrainSize:
+    case paramVelocityToGrainSize:
         fVelocityGrainSize = value;
         fGran.setVelToGrainSize(value);
         break;
 
-    case paramStartPosition:
-    fGran.setStartPosNorm(value);
-    break;
-
-    case paramPositionSpread:
-    fGran.setPosSpreadNorm(value);
-    break;
-
-    case paramSnapMs:
-    fGran.setSnapMs(value);
-    break;
-
-
-    case paramSamplePath:
-        // ignore (used only to make host persist state)
+    case paramPitchRate:
+        fGran.setPitchRateParam(value);
         break;
 
+    case paramRelease:
+        fGran.setReleaseMs(value);
+        break;
+
+    case paramStartPosition:
+        fGran.setStartPosNorm(value);
+        break;
+
+    case paramPositionSpread:
+        fGran.setPosSpreadNorm(value);
+        break;
+
+    case paramSnapMs:
+        fGran.setSnapMs(value);
+        break;
+
+    case paramScanSpeed:
+        fGran.setScanSpeed(value);
+        break;
+
+    case paramScanMode:
+        fGran.setScanMode(std::round(value));
+        gDrumCloudUiScanMode.store((int)std::lround(value), std::memory_order_relaxed);
+        break;
+
+    case paramScanJumpRate:
+        fGran.setScanJumpRateHz(value);
+        break;
+
+    case paramScanJumpAmount:
+        fGran.setScanJumpAmount(value);
+        break;
+
+    case paramScanJumpSmoothMs:
+        fGran.setScanJumpSmoothMs(value);
+        break;
+
+    case paramSyncRate:
+        fGran.setTempoSyncRateChoice(value);
+        break;
+
+    case paramSamplePath:
+        dirtyDbgLog("setParameterValue paramSamplePath <- %.9f", value);
+        fSamplePing = value;
+        break;
 
     default:
         break;
@@ -1592,39 +1961,58 @@ void initState(uint32_t index, State& state) override
 // 🔹 TRIN 3 – Parameter-definition
 void initParameter(uint32_t index, Parameter& parameter) override
 {
-    parameter.hints = kParameterIsAutomatable; // default
+    parameter.hints = kParameterIsAutomatable;
     parameter.ranges.min = 0.0f;
     parameter.ranges.max = 1.0f;
-    parameter.ranges.def = 0.0f;
+    parameter.ranges.def = 2.0f;
 
     switch (index)
     {
     case paramVolume:
         parameter.name   = "Volume";
         parameter.symbol = "volume";
-        parameter.ranges.def = 0.8f;
+        parameter.ranges.def = 1.0f;
         break;
 
-    case paramReleaseMs:
-        parameter.name  = "Release";
-        parameter.symbol = "release";
-        parameter.unit  = "ms";
-        parameter.ranges.min = 5.0f;
-        parameter.ranges.max = 5000.0f;
-        parameter.ranges.def = 250.0f;
-        parameter.hints = kParameterIsAutomatable;
+    case paramDensity:
+        parameter.name   = "Density";
+        parameter.symbol = "density";
+        parameter.ranges.min = 0.0f;
+        parameter.ranges.max = 1.0f;
+        parameter.ranges.def = 0.72f;
         break;
 
-    case paramVelocityAmount:
+    case paramVelocityToDensity:
         parameter.name   = "Velocity → Density";
         parameter.symbol = "vel_density";
-        parameter.ranges.def = 0.75f;
+        parameter.ranges.min = 0.0f;
+        parameter.ranges.max = 1.0f;
+        parameter.ranges.def = 0.42f;
         break;
 
-    case paramVelocityGrainSize:
+    case paramVelocityToGrainSize:
         parameter.name   = "Velocity → Grain Size";
         parameter.symbol = "vel_grain";
-        parameter.ranges.def = 0.5f;
+        parameter.ranges.min = 0.0f;
+        parameter.ranges.max = 1.0f;
+        parameter.ranges.def = 0.58f;
+        break;
+
+    case paramPitchRate:
+        parameter.name   = "Pitch Rate";
+        parameter.symbol = "pitch_rate";
+        parameter.ranges.min = 0.5f;
+        parameter.ranges.max = 2.0f;
+        parameter.ranges.def = 0.71f;
+        break;
+
+    case paramRelease:
+        parameter.name   = "Release";
+        parameter.symbol = "release";
+        parameter.unit   = "ms";
+        parameter.ranges.min = 5.0f;
+        parameter.ranges.max = 5000.0f;
+        parameter.ranges.def = 452.5f;
         break;
 
     case paramStartPosition:
@@ -1642,38 +2030,72 @@ void initParameter(uint32_t index, Parameter& parameter) override
     case paramSnapMs:
         parameter.name   = "Start Snap (ms)";
         parameter.symbol = "snap_ms";
+        parameter.unit   = "ms";
         parameter.ranges.min = 0.0f;
-        parameter.ranges.max = 50.0f;   // fx
-        parameter.ranges.def = 10.0f;   // fx
+        parameter.ranges.max = 50.0f;
+        parameter.ranges.def = 10.0f;
+        break;
+
+    case paramScanSpeed:
+        parameter.name   = "Scan Speed";
+        parameter.symbol = "scan_speed";
+        parameter.ranges.min = 0.0f;
+        parameter.ranges.max = 2.0f;
+        parameter.ranges.def = 0.5f;
+        break;
+
+    case paramScanMode:
+        parameter.name   = "Scan Mode";
+        parameter.symbol = "scan_mode";
+        parameter.hints  = kParameterIsAutomatable | kParameterIsInteger;
+        parameter.ranges.min = 0.0f;
+        parameter.ranges.max = 3.0f;
+        parameter.ranges.def = 2.0f;
+        break;
+
+    case paramScanJumpRate:
+        parameter.name   = "Jump Rate";
+        parameter.symbol = "jump_rate";
+        parameter.unit   = "Hz";
+        parameter.ranges.min = 0.1f;
+        parameter.ranges.max = 40.0f;
+        parameter.ranges.def = 27.0f;
+        break;
+
+    case paramScanJumpAmount:
+        parameter.name   = "Jump Amount";
+        parameter.symbol = "jump_amount";
+        parameter.ranges.min = 0.0f;
+        parameter.ranges.max = 1.0f;
+        parameter.ranges.def = 0.69f;
+        break;
+
+    case paramScanJumpSmoothMs:
+        parameter.name   = "Jump Smooth (ms)";
+        parameter.symbol = "jump_smooth_ms";
+        parameter.unit   = "ms";
+        parameter.ranges.min = 0.0f;
+        parameter.ranges.max = 500.0f;
+        parameter.ranges.def = 272.0f;
         break;
 
     case paramSamplePath:
-    // State sync ping only (ignore value; real path comes from setState("samplePath", ...))
-        parameter.name   = "SamplePath Sync";
+        parameter.name   = "[internal] Sample Sync";
         parameter.symbol = "samplepath_sync";
-        parameter.hints  = kParameterIsAutomatable | kParameterIsHidden;
+        parameter.hints  = kParameterIsHidden;
         parameter.ranges.min = 0.0f;
         parameter.ranges.max = 1.0f;
         parameter.ranges.def = 0.0f;
         break;
 
-        case paramScanPos:
-        parameter.name      = "Scan Pos";
-        parameter.symbol    = "scan_pos";
-        parameter.unit      = "";
-        parameter.hints     = kParameterIsOutput;     // vigtigt: output/meter
-        parameter.ranges.def = 0.0f;
+    case paramScanPos:
+        parameter.name   = "Scan Pos";
+        parameter.symbol = "scan_pos";
+        parameter.hints  = kParameterIsHidden | kParameterIsOutput;
         parameter.ranges.min = 0.0f;
         parameter.ranges.max = 1.0f;
+        parameter.ranges.def = 0.0f;
         break;
-
-
-
-
-
-
-    
-
 
     }
 }
@@ -1733,40 +2155,78 @@ void initParameter(uint32_t index, Parameter& parameter) override
 fGran.doPendingLoad();
 
 
-// --- optional: mark that we passed first init (debug only) ---
-if (fGranInit && !fTriedRestore)
-{
-    fTriedRestore = true;
-}
+    // --- optional: mark that we passed first init (debug only) ---
+    if (fGranInit && !fTriedRestore)
+    {
+        fTriedRestore = true;
+#if DRUMCLOUD_DEBUG
+        if (FILE* fp = std::fopen("/tmp/drumcloud-restore.log", "a"))
+        {
+            std::fprintf(fp, "run(): engine init ok, samplePathEmpty=%d pending=%d\n",
+                         fSamplePath.empty() ? 1 : 0, fPendingSampleLoad ? 1 : 0);
+            std::fclose(fp);
+        }
+#endif
+    }
 
-// --- load sample if pending (single place) ---
-if (fGranInit && fPendingSampleLoad && !fSamplePath.empty())
-{
-    fGran.setSamplePath(fSamplePath.c_str());
-    fPendingSampleLoad = false;
-}
+    // --- load sample if pending (single place) ---
+    if (fGranInit && fPendingSampleLoad && !fSamplePath.empty())
+    {
+#if DRUMCLOUD_DEBUG
+        if (FILE* fp = std::fopen("/tmp/drumcloud-restore.log", "a"))
+        {
+            std::fprintf(fp, "run(): loading samplePath='%s'\n", fSamplePath.c_str());
+            std::fclose(fp);
+        }
+#endif
+        fGran.setSamplePath(fSamplePath.c_str());
+        fPendingSampleLoad = false;
+    }
 
-// --- handle MIDI -> granular engine ---
-for (uint32_t i = 0; i < midiEventCount; ++i)
-{
-    const MidiEvent& ev = midiEvents[i];
-    if (ev.size < 3) continue;
+    // --- host tempo -> engine (for Mode 3 tempo sync) ---
+    {
+        float bpm = 120.0f;
+        bool playing = false;
+       #if DISTRHO_PLUGIN_WANT_TIMEPOS
+        const TimePosition& tp = getTimePosition();
+        if (tp.bbt.valid)
+        {
+            bpm = float(tp.bbt.beatsPerMinute);
+            const double sr = std::max(1.0, double(getSampleRate()));
+            const double beatsPerSecond = double(tp.bbt.beatsPerMinute) / 60.0;
+            const double beatPos = (double(tp.frame) / sr) * beatsPerSecond * double(fGran.getTempoSyncRateMultiplier());
+            const double beatPhase = beatPos - std::floor(beatPos);
+            fGran.setTempoSyncPhase(float(beatPhase));
+        }
+        playing = tp.playing;
+       #endif
+        fGran.setTempoSyncInfo(bpm, playing);
+    }
 
-    const uint8_t st   = ev.data[0] & 0xF0;
-    const uint8_t note = ev.data[1] & 0x7F;
-    const uint8_t vel  = ev.data[2] & 0x7F;
+    // --- handle MIDI -> granular engine ---
+    for (uint32_t i = 0; i < midiEventCount; ++i)
+    {
+        const MidiEvent& ev = midiEvents[i];
+        if (ev.size < 3) continue;
 
-    if (st == 0x90 && vel > 0)
-        fGran.trigger(note, vel);
-    else if (st == 0x80 || (st == 0x90 && vel == 0))
-        fGran.noteOff(note);
-}
+        const uint8_t st   = ev.data[0] & 0xF0;
+        const uint8_t note = ev.data[1] & 0x7F;
+        const uint8_t vel  = ev.data[2] & 0x7F;
+
+        if (st == 0x90 && vel > 0)
+            fGran.trigger(note, vel);
+        else if (st == 0x80 || (st == 0x90 && vel == 0))
+            fGran.noteOff(note);
+    }
 
     // --- render audio ---
     std::memset(outL, 0, sizeof(float) * frames);
     std::memset(outR, 0, sizeof(float) * frames);
 
     fGran.process(outL, outR, frames);
+
+    gDrumCloudUiScanPos.store(fGran.getScanPosNorm(), std::memory_order_relaxed);
+    gDrumCloudUiScanMode.store((int)std::lround(fGran.getScanMode()), std::memory_order_relaxed);
 
     // ---- push scan pos to UI (meter/output), throttled ----
     if (fScanMeterCountdown == 0)
@@ -1777,7 +2237,7 @@ for (uint32_t i = 0; i < midiEventCount; ++i)
     fScanMeterCountdown = framesPerTick;
 
     const float scan = fGran.getScanPosNorm();
-    setParameterValue(paramScanPos, scan);
+    (void)scan; // UI sync now comes from shared atomics; avoid host param pushes that cause dirty state
     }
     else
     {
@@ -1805,19 +2265,20 @@ for (uint32_t i = 0; i < midiEventCount; ++i)
 private:
     std::string fSamplePath;   // 👈 her (persistet værdi)
     uint32_t fSampleId = 0;
+    float fSamplePing = 0.0f;
     
 
 
     GranularEngine fGran;
     bool fGranInit = false;
 
-    float fVolume = 0.8f;
-    float fVelocityAmount = 0.75f;
-    float fVelocityGrainSize = 0.5f;
+    float fVolume = 1.0f;
+    float fVelocityAmount = 0.42f;
+    float fVelocityGrainSize = 0.58f;
     bool   fPendingSampleLoad = false;
     double fLastSR = 0.0;
     bool fTriedRestore = false;
-    float fReleaseMs = 250.0f; // default release i ms
+    float fReleaseMs = 452.5f; // default release i ms
     
     uint32_t fScanMeterCountdown = 0;    // 👈 NY (throttle til GUI)
     
