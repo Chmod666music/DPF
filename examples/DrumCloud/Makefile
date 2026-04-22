@@ -13,7 +13,7 @@ FILES_UI = \
  
 
 # Build only CLAP for now
-TARGETS = clap
+TARGETS = clap vst3 lv2
 
 # Use C++17
 CXXFLAGS += -std=gnu++17
