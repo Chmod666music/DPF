@@ -1698,7 +1698,7 @@ protected:
     */
     const char* getMaker() const override
     {
-        return "DISTRHO";
+        return "Fuimadane";
     }
 
     // --------------------------------------------------------------------------------------------------------
@@ -1765,7 +1765,7 @@ void setState(const char* key, const char* value) override
     */
     const char* getHomePage() const override
     {
-        return "https://github.com/DISTRHO/DPF";
+        return "https://linktr.ee/Fuimadane";
     }
 
    /**
