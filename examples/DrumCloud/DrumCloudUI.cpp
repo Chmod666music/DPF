@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <string>
 #include <cstdlib>
+#include <cstdio>
 #include <cmath>
 #include <chrono>
 #include <atomic>
@@ -69,6 +70,67 @@ static bool cacheRead(uint32_t id, std::string& outPath)
 
     std::fclose(fp);
     return false;
+}
+
+static std::string trimWhitespace(std::string s)
+{
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ' || s.back() == '\t'))
+        s.pop_back();
+
+    std::size_t start = 0;
+    while (start < s.size() && (s[start] == ' ' || s[start] == '\t'))
+        ++start;
+
+    return s.substr(start);
+}
+
+static std::string runCommandCapture(const char* cmd)
+{
+    if (cmd == nullptr || *cmd == '\0')
+        return {};
+
+    FILE* pipe = popen(cmd, "r");
+    if (pipe == nullptr)
+        return {};
+
+    char buffer[1024];
+    std::string out;
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
+        out += buffer;
+
+    const int rc = pclose(pipe);
+    if (rc != 0)
+        return {};
+
+    return trimWhitespace(out);
+}
+
+static std::string openNativeSampleDialog()
+{
+    const char* home = std::getenv("HOME");
+    const char* startDir = (home != nullptr && *home != '\0') ? home : ".";
+
+    std::string cmd;
+
+    cmd = std::string("kdialog --getopenfilename \"") + startDir +
+          "\" '*.wav *.flac *.mp3|Audio files' 2>/dev/null";
+    std::string path = runCommandCapture(cmd.c_str());
+    if (!path.empty())
+        return path;
+
+    cmd = std::string("zenity --file-selection --title='Load sample' --filename='") + startDir +
+          "/' --file-filter='Audio files | *.wav *.flac *.mp3' 2>/dev/null";
+    path = runCommandCapture(cmd.c_str());
+    if (!path.empty())
+        return path;
+
+    cmd = std::string("yad --file --title='Load sample' --filename='") + startDir +
+          "/' --file-filter='*.wav *.flac *.mp3' 2>/dev/null";
+    path = runCommandCapture(cmd.c_str());
+    if (!path.empty())
+        return path;
+
+    return {};
 }
 
 static bool cacheReadNearby(uint32_t id, std::string& outPath)
@@ -935,8 +997,23 @@ bool DrumCloudUI::onMouse(const MouseEvent& ev)
 
         if (hitWave)
         {
-            fChoosingSample = true;
-            requestStateFile("samplePath");
+            const std::string chosen = openNativeSampleDialog();
+            if (!chosen.empty())
+            {
+                fSamplePath = chosen;
+                fWaveValid = false;
+                if (!fSamplePath.empty())
+                    fWaveValid = loadWavePreviewFromAudioFile(fSamplePath.c_str());
+
+                fChoosingSample = false;
+                setState("samplePath", chosen.c_str());
+                repaint();
+            }
+            else
+            {
+                fChoosingSample = true;
+                requestStateFile("samplePath");
+            }
             return true;
         }
         return false;
