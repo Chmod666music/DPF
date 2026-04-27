@@ -40,7 +40,6 @@ See [this wiki page](https://github.com/DISTRHO/DPF/wiki/Plugins-made-with-DPF) 
 
 Plugin examples are also available in the `example/` folder inside this repo.
 
-
 ## DrumCloud by Fuimadane
 
 DrumCloud is a granular sample instrument for Linux.
@@ -63,25 +62,26 @@ Tested in:
    https://github.com/Chmod666music/DPF/releases/tag/v1.7-build-scripts-and-vst2
 
 2. Download the format you want:
-
-- DrumCloud-Fuimadane-CLAP-Linux-v1.7.zip
-- DrumCloud-Fuimadane-VST3-Linux-v1.7.zip
-- DrumCloud-Fuimadane-LV2-Linux-v1.7.zip
-- DrumCloud-Fuimadane-VST2-Linux-v1.7.zip
+   - DrumCloud-Fuimadane-CLAP-Linux-v1.7.zip
+   - DrumCloud-Fuimadane-VST3-Linux-v1.7.zip
+   - DrumCloud-Fuimadane-LV2-Linux-v1.7.zip
+   - DrumCloud-Fuimadane-VST2-Linux-v1.7.zip
 
 3. Extract the zip file.
 
 4. Copy the plugin to the correct Linux folder:
-
-- CLAP → `~/.clap/`
-- VST3 → `~/.vst3/`
-- LV2 → `~/.lv2/`
-- VST2 → `~/.vst/`
+   - CLAP → `~/.clap/`
+   - VST3 → `~/.vst3/`
+   - LV2 → `~/.lv2/`
+   - VST2 → `~/.vst/`
 
 If needed, create the folders first:
 
 ```bash
 mkdir -p ~/.clap ~/.vst3 ~/.lv2 ~/.vst
+
+5. Rescan plugins in your DAW and look for:
+DrumCloud (Fuimadane)
 
 Build From Source
 
@@ -97,3 +97,6 @@ sudo apt install build-essential pkg-config \
 
 ./build.sh
 ./install.sh
+
+For more detailed build instructions, see:
+examples/DrumCloud/BUILD.md
