@@ -24,7 +24,6 @@ Provided features and implementation status for specific plugin formats can be s
 DPF is released under ISC, which basically means you can do whatever you want as long as you credit the original authors.  
 Some plugin formats may have additional restrictions, see [LICENSING.md](LICENSING.md) for details.
 
-
 ## Help and documentation
 
 Bug reports happen on the [DPF github project](https://github.com/DISTRHO/DPF/issues).
@@ -32,7 +31,6 @@ Bug reports happen on the [DPF github project](https://github.com/DISTRHO/DPF/is
 Online documentation is available at [https://distrho.github.io/DPF/](https://distrho.github.io/DPF/).
 
 Online help and discussion about DPF happens in the [DPF github discussions](https://github.com/DISTRHO/DPF/discussions).
-
 
 ## List of plugins made with DPF:
 
@@ -77,13 +75,16 @@ Tested in:
 
 If needed, create the folders first:
 
-```bash
+
 mkdir -p ~/.clap ~/.vst3 ~/.lv2 ~/.vst
 
 5. Rescan plugins in your DAW and look for:
-DrumCloud (Fuimadane)
 
-Build From Source
+`DrumCloud (Fuimadane)`
+
+
+### Build From Source
+```bash
 
 git clone --recursive https://github.com/Chmod666music/DPF.git
 cd DPF
@@ -98,5 +99,7 @@ sudo apt install build-essential pkg-config \
 ./build.sh
 ./install.sh
 
+
 For more detailed build instructions, see:
-examples/DrumCloud/BUILD.md
+
+`examples/DrumCloud/BUILD.md`
