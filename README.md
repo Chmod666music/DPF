@@ -83,6 +83,8 @@ If needed, create the folders first:
 ```bash
 mkdir -p ~/.clap ~/.vst3 ~/.lv2 ~/.vst
 
+### Build From Source
+
 git clone --recursive https://github.com/Chmod666music/DPF.git
 cd DPF
 git checkout drumcloud-clean-stable
