@@ -40,7 +40,7 @@ sudo apt install build-essential pkg-config \
 
 **2. Clone the repository:**
 ```bash
-git clone --recursive [https://github.com/Chmod666music/DPF.git](https://github.com/Chmod666music/DPF.git)
+git clone --recursive https://github.com/Chmod666music/DPF.git
 cd DPF/examples/DrumCloud
 ```
 
