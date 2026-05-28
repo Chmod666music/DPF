@@ -17,6 +17,10 @@ enum DrumCloudParams
     paramScanJumpAmount,
     paramScanJumpSmoothMs,
     paramSyncRate,
+    paramFilter,
+    paramResonance,
+    paramReverbSize, // 👈 Her er de nye!
+    paramReverbMix,  // 👈 Her er de nye!
     paramSamplePath,
     paramScanPos,
     paramCount

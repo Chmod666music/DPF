@@ -14,9 +14,93 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include "DistrhoPluginInfo.h"   // 👈 SKAL komme før
-#include "DistrhoPlugin.hpp"     // 👈 så Plugin-klassen får getState med
+#define _USE_MATH_DEFINES
+#include "DistrhoPluginInfo.h"
+#include "DistrhoPlugin.hpp"
 #include "AudioFileLoader.hpp"
+
+// 👇 SÆT FILTER-KLASSEN IND HER 👇
+struct SvfStereo {
+    float ic1eqL=0, ic2eqL=0, ic1eqR=0, ic2eqR=0;
+    void process(float& L, float& R, float cutoff, float res, float sr, float type) {
+        float g = std::tan(3.14159265358979323846f * cutoff / sr);
+        float k = 2.0f - 2.0f * res;
+        float a1 = 1.0f / (1.0f + g * (g + k));
+        float a2 = g * a1;
+        float a3 = g * a2;
+
+        float v3L = L - ic2eqL;
+        float v1L = a1 * ic1eqL + a2 * v3L;
+        float v2L = ic2eqL + a2 * ic1eqL + a3 * v3L;
+        ic1eqL = 2.0f * v1L - ic1eqL;
+        ic2eqL = 2.0f * v2L - ic2eqL;
+
+        float v3R = R - ic2eqR;
+        float v1R = a1 * ic1eqR + a2 * v3R;
+        float v2R = ic2eqR + a2 * ic1eqR + a3 * v3R;
+        ic1eqR = 2.0f * v1R - ic1eqR;
+        ic2eqR = 2.0f * v2R - ic2eqR;
+
+        L = (type < 0.5f) ? v2L : (L - k * v1L - v2L);
+        R = (type < 0.5f) ? v2R : (R - k * v1R - v2R);
+    }
+};
+// 👆 SLUT PÅ FILTER 👆
+// 👇 CLOUD REVERB ALGORITME START 👇
+struct DelayLine {
+    std::vector<float> buffer;
+    uint32_t pos = 0;
+    void init(uint32_t length) {
+        buffer.assign(length, 0.0f);
+        pos = 0;
+    }
+    float read() const { return buffer.empty() ? 0.0f : buffer[pos]; }
+    void write(float v) {
+        if (buffer.empty()) return;
+        buffer[pos] = v;
+        if (++pos >= buffer.size()) pos = 0;
+    }
+};
+
+struct CloudReverb {
+    DelayLine dl[4];
+    float lp[4] = {0,0,0,0};
+    void init(float sr) {
+        dl[0].init(sr * 0.0313f);
+        dl[1].init(sr * 0.0371f);
+        dl[2].init(sr * 0.0411f);
+        dl[3].init(sr * 0.0437f);
+    }
+    void process(float& L, float& R, float size, float wet) {
+        if (wet < 0.001f) return; // Spar CPU hvis den er slukket
+        float fb = 0.7f + size * 0.28f;
+        float damp = 0.2f + size * 0.3f;
+
+        float r0 = dl[0].read(); float r1 = dl[1].read();
+        float r2 = dl[2].read(); float r3 = dl[3].read();
+
+        lp[0] = r0 * (1.0f - damp) + lp[0] * damp;
+        lp[1] = r1 * (1.0f - damp) + lp[1] * damp;
+        lp[2] = r2 * (1.0f - damp) + lp[2] * damp;
+        lp[3] = r3 * (1.0f - damp) + lp[3] * damp;
+
+        float inMix = (L + R) * 0.5f;
+
+        float w0 = lp[0] + lp[1] + lp[2] + lp[3];
+        float w1 = lp[0] - lp[1] + lp[2] - lp[3];
+        float w2 = lp[0] + lp[1] - lp[2] - lp[3];
+        float w3 = lp[0] - lp[1] - lp[2] + lp[3];
+
+        dl[0].write(inMix + w0 * 0.5f * fb);
+        dl[1].write(inMix + w1 * 0.5f * fb);
+        dl[2].write(inMix + w2 * 0.5f * fb);
+        dl[3].write(inMix + w3 * 0.5f * fb);
+
+        L = L * (1.0f - wet) + (r0 - r1) * wet;
+        R = R * (1.0f - wet) + (r2 - r3) * wet;
+    }
+};
+// 👆 CLOUD REVERB ALGORITME SLUT 👆
 
 
 
@@ -1643,23 +1727,16 @@ private:
 
 
 // (så kommer plugin-klassen)
+enum DrumCloudStates {
+    stateSamplePath = 0,
+    stateCount
+};
+
 class SendNoteExamplePlugin : public Plugin
-
 {
-    
-
-    enum States {
-        stateSamplePath = 0,
-        stateCount
-    };
-
-
-    // ... resten af klassen (initState, getState, setState, osv.)
-
-
 public:
     SendNoteExamplePlugin()
-    : Plugin(paramCount, 0, stateCount)
+    : Plugin(paramCount, 1, stateCount) // Nu har vi 1 program!
 {}
 
 
@@ -1782,10 +1859,22 @@ void setState(const char* key, const char* value) override
     */
     uint32_t getVersion() const override
 {
-    return d_version(1, 0, 0);
+    return d_version(1, 8, 0); 
 }
 float getParameterValue(uint32_t index) const override
 {
+    if (index == paramReverbSize) 
+        return fReverbSize; // NYT
+
+    if (index == paramReverbMix) 
+        return fReverbMix;   // NYT
+    
+    if (index == paramFilter) 
+        return fFilter;       // NYT
+
+    if (index == paramResonance) 
+        return fResonance; // NYT
+
     if (index == paramVolume)
         return fVolume;
 
@@ -1851,6 +1940,18 @@ void setParameterValue(uint32_t index, float value) override
 {
     switch (index)
     {
+    case paramReverbSize: 
+        fReverbSize = value; break; // NYT
+
+    case paramReverbMix: 
+        fReverbMix = value; break;   // NYT
+
+    case paramFilter: fFilter = value; 
+        break;       // NYT
+
+    case paramResonance: fResonance = value; 
+        break; // NYT
+    
     case paramVolume:
         fVolume = value;
         break;
@@ -1940,23 +2041,41 @@ void initState(uint32_t index, State& state) override
     state.hints = kStateIsFilenamePath; // <-- din DPF har denne
 }
 
+// --- Program / Preset Opsætning ---
+void initProgramName(uint32_t index, String& programName) override
+{
+    if (index == 0)
+        programName = "Default";
+}
 
+void loadProgram(uint32_t index) override
+{
+        if (index == 0)
+        {
+            setParameterValue(paramVolume, 1.0f);
+            setParameterValue(paramDensity, 0.72f);
+            setParameterValue(paramVelocityToDensity, 0.42f);
+            setParameterValue(paramVelocityToGrainSize, 0.58f);
+            setParameterValue(paramPitchRate, 0.71f);
+            setParameterValue(paramRelease, 452.5f);
+            setParameterValue(paramStartPosition, 0.0f);
+            setParameterValue(paramPositionSpread, 0.0f);
+            setParameterValue(paramSnapMs, 10.0f);
+            setParameterValue(paramScanSpeed, 0.5f);
+            setParameterValue(paramScanMode, 2.0f);
+            setParameterValue(paramScanJumpRate, 27.0f);
+            setParameterValue(paramScanJumpAmount, 0.69f);
+            setParameterValue(paramScanJumpSmoothMs, 272.0f);
+            setParameterValue(paramSyncRate, 1.0f);
+            
+            setParameterValue(paramFilter, 0.5f);
+            setParameterValue(paramResonance, 0.0f);
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+            // 👇 De to nye reverb-parametre 👇
+            setParameterValue(paramReverbSize, 0.8f);
+            setParameterValue(paramReverbMix, 0.0f);
+        }
+}
 
 // 🔹 TRIN 3 – Parameter-definition
 void initParameter(uint32_t index, Parameter& parameter) override
@@ -1964,7 +2083,7 @@ void initParameter(uint32_t index, Parameter& parameter) override
     parameter.hints = kParameterIsAutomatable;
     parameter.ranges.min = 0.0f;
     parameter.ranges.max = 1.0f;
-    parameter.ranges.def = 2.0f;
+    parameter.ranges.def = 0.0f; 
 
     switch (index)
     {
@@ -1977,24 +2096,18 @@ void initParameter(uint32_t index, Parameter& parameter) override
     case paramDensity:
         parameter.name   = "Density";
         parameter.symbol = "density";
-        parameter.ranges.min = 0.0f;
-        parameter.ranges.max = 1.0f;
         parameter.ranges.def = 0.72f;
         break;
 
     case paramVelocityToDensity:
-        parameter.name   = "Velocity → Density";
+        parameter.name   = "Velocity -> Density";
         parameter.symbol = "vel_density";
-        parameter.ranges.min = 0.0f;
-        parameter.ranges.max = 1.0f;
         parameter.ranges.def = 0.42f;
         break;
 
     case paramVelocityToGrainSize:
-        parameter.name   = "Velocity → Grain Size";
+        parameter.name   = "Velocity -> Grain Size";
         parameter.symbol = "vel_grain";
-        parameter.ranges.min = 0.0f;
-        parameter.ranges.max = 1.0f;
         parameter.ranges.def = 0.58f;
         break;
 
@@ -2065,8 +2178,6 @@ void initParameter(uint32_t index, Parameter& parameter) override
     case paramScanJumpAmount:
         parameter.name   = "Jump Amount";
         parameter.symbol = "jump_amount";
-        parameter.ranges.min = 0.0f;
-        parameter.ranges.max = 1.0f;
         parameter.ranges.def = 0.69f;
         break;
 
@@ -2079,12 +2190,42 @@ void initParameter(uint32_t index, Parameter& parameter) override
         parameter.ranges.def = 272.0f;
         break;
 
+    case paramSyncRate:
+        parameter.name   = "Sync Rate";
+        parameter.symbol = "sync_rate";
+        parameter.ranges.def = 1.0f;
+        break;
+
+    case paramFilter:
+        parameter.name   = "Filter";
+        parameter.symbol = "filter";
+        parameter.ranges.def = 0.5f;
+        break;
+
+    case paramResonance:
+        parameter.name   = "Resonance";
+        parameter.symbol = "resonance";
+        parameter.ranges.def = 0.0f;
+        break;
+
+    // 👇 NYT 👇
+    case paramReverbSize:
+        parameter.name   = "Reverb Size";
+        parameter.symbol = "reverb_size";
+        parameter.ranges.def = 0.8f;
+        break;
+
+    case paramReverbMix:
+        parameter.name   = "Reverb Mix";
+        parameter.symbol = "reverb_mix";
+        parameter.ranges.def = 0.0f;
+        break;
+    // 👆 NYT 👆
+
     case paramSamplePath:
         parameter.name   = "[internal] Sample Sync";
         parameter.symbol = "samplepath_sync";
         parameter.hints  = kParameterIsHidden;
-        parameter.ranges.min = 0.0f;
-        parameter.ranges.max = 1.0f;
         parameter.ranges.def = 0.0f;
         break;
 
@@ -2092,11 +2233,8 @@ void initParameter(uint32_t index, Parameter& parameter) override
         parameter.name   = "Scan Pos";
         parameter.symbol = "scan_pos";
         parameter.hints  = kParameterIsHidden | kParameterIsOutput;
-        parameter.ranges.min = 0.0f;
-        parameter.ranges.max = 1.0f;
         parameter.ranges.def = 0.0f;
         break;
-
     }
 }
 
@@ -2135,6 +2273,9 @@ void initParameter(uint32_t index, Parameter& parameter) override
       Run/process function for plugins with MIDI input.
       This synthesizes the MIDI voices with a sum of sine waves.
     */
+    /**
+      Run/process function for plugins with MIDI input.
+    */
     void run(const float**, float** outputs, uint32_t frames,
          const MidiEvent* midiEvents, uint32_t midiEventCount) override
 {
@@ -2143,47 +2284,27 @@ void initParameter(uint32_t index, Parameter& parameter) override
 
     // --- init engine if needed ---
     if (!fGranInit || fLastSR != getSampleRate())
-{
-    fGran.init(getSampleRate());
-    fLastSR = getSampleRate();
-    fGranInit = true;
-    // Note: init only here; sample loads via pending in run()
+    {
+        fGran.init(getSampleRate());
+        m_reverb.init(getSampleRate()); // 👈 VIGTIGT: Starter rumklangen
+        fLastSR = getSampleRate();
+        fGranInit = true;
+    }
 
-}
+    fGran.doPendingLoad();
 
-// ✅ do pending load here (safe, runs every block)
-fGran.doPendingLoad();
-
-
-    // --- optional: mark that we passed first init (debug only) ---
     if (fGranInit && !fTriedRestore)
     {
         fTriedRestore = true;
-#if DRUMCLOUD_DEBUG
-        if (FILE* fp = std::fopen("/tmp/drumcloud-restore.log", "a"))
-        {
-            std::fprintf(fp, "run(): engine init ok, samplePathEmpty=%d pending=%d\n",
-                         fSamplePath.empty() ? 1 : 0, fPendingSampleLoad ? 1 : 0);
-            std::fclose(fp);
-        }
-#endif
     }
 
-    // --- load sample if pending (single place) ---
     if (fGranInit && fPendingSampleLoad && !fSamplePath.empty())
     {
-#if DRUMCLOUD_DEBUG
-        if (FILE* fp = std::fopen("/tmp/drumcloud-restore.log", "a"))
-        {
-            std::fprintf(fp, "run(): loading samplePath='%s'\n", fSamplePath.c_str());
-            std::fclose(fp);
-        }
-#endif
         fGran.setSamplePath(fSamplePath.c_str());
         fPendingSampleLoad = false;
     }
 
-    // --- host tempo -> engine (for Mode 3 tempo sync) ---
+    // --- host tempo -> engine ---
     {
         float bpm = 120.0f;
         bool playing = false;
@@ -2223,29 +2344,50 @@ fGran.doPendingLoad();
     std::memset(outL, 0, sizeof(float) * frames);
     std::memset(outR, 0, sizeof(float) * frames);
 
+    // 1. Generer lyden fra skyerne
     fGran.process(outL, outR, frames);
 
+    // 2. Kør lyden gennem Filteret! 👇
+    if (std::fabs(fFilter - 0.5f) > 0.01f) { 
+        float type = (fFilter < 0.5f) ? 0.0f : 1.0f; // 0 = LP, 1 = HP
+        float cutoff = 20000.0f;
+        
+        if (type == 0.0f) {
+            float norm = fFilter * 2.0f; 
+            cutoff = 20.0f * std::pow(1000.0f, norm); 
+        } else {
+            float norm = (fFilter - 0.5f) * 2.0f; 
+            cutoff = 20.0f * std::pow(1000.0f, norm);
+        }
+        
+        cutoff = std::clamp(cutoff, 20.0f, (float)getSampleRate() * 0.49f);
+        float res = std::clamp(fResonance, 0.0f, 0.95f); 
+
+        for(uint32_t f=0; f<frames; ++f) {
+            m_svf.process(outL[f], outR[f], cutoff, res, (float)getSampleRate(), type);
+        }
+    }
+
+    // 3. Kør lyden gennem Rumklangen! 👇
+    if (fReverbMix > 0.001f) {
+        for(uint32_t f=0; f<frames; ++f) {
+            m_reverb.process(outL[f], outR[f], fReverbSize, fReverbMix);
+        }
+    }
+
+    // Send data til UI
     gDrumCloudUiScanPos.store(fGran.getScanPosNorm(), std::memory_order_relaxed);
     gDrumCloudUiScanMode.store((int)std::lround(fGran.getScanMode()), std::memory_order_relaxed);
 
-    // ---- push scan pos to UI (meter/output), throttled ----
     if (fScanMeterCountdown == 0)
-{
-    const uint32_t framesPerTick =
-        std::max<uint32_t>(1u, (uint32_t)(getSampleRate() / 30.0f));
-
-    fScanMeterCountdown = framesPerTick;
-
-    const float scan = fGran.getScanPosNorm();
-    (void)scan; // UI sync now comes from shared atomics; avoid host param pushes that cause dirty state
+    {
+        const uint32_t framesPerTick = std::max<uint32_t>(1u, (uint32_t)(getSampleRate() / 30.0f));
+        fScanMeterCountdown = framesPerTick;
     }
     else
     {
-    fScanMeterCountdown =
-        (fScanMeterCountdown > frames) ? (fScanMeterCountdown - frames) : 0;
+        fScanMeterCountdown = (fScanMeterCountdown > frames) ? (fScanMeterCountdown - frames) : 0;
     }
-
-
 
     // --- apply output gain ---
     const float vol = fVolume * fVolume;
@@ -2263,37 +2405,31 @@ fGran.doPendingLoad();
 
 
 private:
-    std::string fSamplePath;   // 👈 her (persistet værdi)
+    std::string fSamplePath;
     uint32_t fSampleId = 0;
     float fSamplePing = 0.0f;
     
-
-
     GranularEngine fGran;
     bool fGranInit = false;
 
     float fVolume = 1.0f;
     float fVelocityAmount = 0.42f;
     float fVelocityGrainSize = 0.58f;
-    bool   fPendingSampleLoad = false;
+    bool fPendingSampleLoad = false;
     double fLastSR = 0.0;
     bool fTriedRestore = false;
-    float fReleaseMs = 452.5f; // default release i ms
-    
-    uint32_t fScanMeterCountdown = 0;    // 👈 NY (throttle til GUI)
-    
-    
+    float fReleaseMs = 452.5f; 
+    uint32_t fScanMeterCountdown = 0;    
 
+    float fFilter = 0.5f;
+    float fResonance = 0.0f;
+    SvfStereo m_svf;
 
-
-    
-
-
-
-    
-
-
-};
+    // 👇 Her sætter du dem ind! 👇
+    float fReverbSize = 0.8f;
+    float fReverbMix = 0.0f;
+    CloudReverb m_reverb;
+}; // <-- Slutningen af din Plugin-klasse
 
 
 
