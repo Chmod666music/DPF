@@ -14,7 +14,11 @@
 #include <cmath>
 #include <chrono>
 #include <atomic>
-#include <GL/gl.h>
+#ifdef __APPLE__
+  #include <OpenGL/gl.h>
+#else
+  #include <GL/gl.h>
+#endif
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
