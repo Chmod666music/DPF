@@ -13,6 +13,18 @@ The current file in [DrumCloud-ReaPack](https://github.com/Chmod666music/DrumClo
 - macOS: VST3 and AU first, then CLAP where host support warrants it. Build and test Apple Silicon and Intel variants, native dialogs, UI rendering, sample paths and host recall. Investigate signing, notarization and bundle integrity before distribution; source compatibility in v1.8.1 does not establish working binaries.
 - Run builds and smoke tests on the target operating system. Keep format IDs and state behavior stable, and package the correct UI resources with each binary.
 
+## Beta testing and releases
+
+- Publish numbered beta builds separately for Linux, Windows and macOS as each target becomes buildable. State exactly which architecture and plugin format each download supports; an unbuilt or untested platform remains marked pending.
+- Begin with a private/internal smoke test of sample loading, state recall, MIDI, GUI resizing and host stability. Then offer public beta packages and invite volunteers without assuming testers are available.
+- Provide a short test checklist and a GitHub issue template requesting operating system/version, CPU architecture, plugin format, DAW/version, steps, expected/actual behavior, screenshots or logs, and whether the old project still opens. Ask testers not to include personal sample files unless they choose to share them.
+- Keep a per-host matrix for Linux (Bitwig, REAPER, Ardour), Windows (at least two VST3 DAWs), and macOS (VST3 and AU in at least one host each). Track confirmed results, failures and untested cells separately. Do not equate one host passing with all hosts passing.
+- Iterate beta releases after fixes. Promote a stable cross-platform release only after confirmed installation, sample load, project restore and playback tests on each advertised operating system. If a platform lags, release tested platforms and identify the pending platform clearly.
+
+## Repository identity
+
+The current repository is a full DPF fork with DrumCloud under `examples/DrumCloud`. Prefer a dedicated `Fuimadane-DrumCloud` repository for product discovery, releases and tester issues, while keeping DPF credited as the framework. Before moving, verify submodules, build paths, release assets, GitHub links and local remotes. Preserve git history or document the source import, and point existing users to the new canonical repository. Avoid claiming the migration is complete until builds and links work from the dedicated checkout.
+
 ## Native order of work
 
 1. Move file decoding and waveform preparation out of the audio callback. Build a bounded decoded buffer, then transfer it at a safe point without blocking, allocating, or freeing in the audio callback. Keep the old sample playing on a failed load. Verify rapid sample changes and project restore in Bitwig and REAPER, then in representative Windows and macOS hosts.
