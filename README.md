@@ -1,11 +1,15 @@
-# DrumCloud
+# Fuimadane DrumCloud
 
 <img width="820" height="404" alt="Screenshot_20260528_100702" src="https://github.com/user-attachments/assets/3742a4cb-bf83-4e89-ae4e-b2c9ba1314d9" />
 
 
-**DrumCloud** is a granular sample instrument for Linux, built with the DISTRHO Plugin Framework (DPF) by Fuimadane. 
+**Fuimadane DrumCloud** is a granular sample instrument for Linux, built with the DISTRHO Plugin Framework (DPF) by Fuimadane. 
 
 It allows you to load your own samples directly from the UI and manipulate them into massive, atmospheric soundscapes using granular synthesis, built-in cloud reverb, and state variable filtering.
+
+The current public release is **v1.8.1**. Future beta builds aim to cover Linux, Windows and macOS; each platform will be listed only after a build and host test.
+
+The plugin source is in [examples/DrumCloud](examples/DrumCloud), while this repository also contains the DPF framework fork. DrumCloud uses DPF and credits its upstream authors.
 
 ## ✨ Features (v1.8)
 - **Scalable Vector UI:** A modern dark mode layout with responsive custom knobs.
