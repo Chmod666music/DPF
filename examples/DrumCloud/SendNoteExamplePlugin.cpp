@@ -112,6 +112,8 @@ struct CloudReverb {
 #include <cstdio>
 #include <vector>
 #include <string>
+#include <filesystem>
+#include <system_error>
 #include <fstream>
 #include <cstdlib>   // getenv
 #include <atomic>
@@ -240,9 +242,8 @@ static void cacheWrite(uint32_t id, const std::string& path)
     // best-effort: ensure ~/.config exists
     if (const char* home = std::getenv("HOME"))
     {
-        std::string cmd = "mkdir -p '" + std::string(home) + "/.config'";
-        int rc = std::system(cmd.c_str());
-        (void)rc;
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(home) / ".config", ec);
     }
 
     if (std::FILE* fp = std::fopen(fn.c_str(), "a"))
@@ -1859,7 +1860,7 @@ void setState(const char* key, const char* value) override
     */
     uint32_t getVersion() const override
 {
-    return d_version(1, 8, 0); 
+    return d_version(1, 8, 1); 
 }
 float getParameterValue(uint32_t index) const override
 {
